@@ -82,14 +82,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@v4
-
       - name: Set up Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref_name != 'main' }}
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
