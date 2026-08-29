@@ -123,24 +123,39 @@ jobs:
             fi
           done < <(find "$app_path" -type f -print0)
 
+          # GitHub-hosted builds have no Developer ID certificate. Xcode's
+          # sandbox entitlements require a trusted certificate chain, so the
+          # downloadable test build must use an entitlement-free ad-hoc
+          # signature. A public release must replace this with Developer ID
+          # signing and notarization.
+          codesign --force --sign - "$app_path"
+
           test -x "$executable_path"
           test "$executable_name" = "Plana App"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist_path")" = "11.0"
           codesign --verify --deep --strict --verbose=4 "$app_path"
-          codesign --display --entitlements "$entitlements_path" "$app_path"
-          cat "$entitlements_path"
-
-          debug_entitlement="$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :com.apple.security.get-task-allow' \
-              "$entitlements_path" 2>/dev/null || true
-          )"
-          if [[ "$debug_entitlement" == "true" ]]; then
-            echo '::error::Release signature contains com.apple.security.get-task-allow=true'
-            exit 1
+          codesign --display --entitlements "$entitlements_path" "$app_path" || true
+          if [[ -s "$entitlements_path" ]]; then
+            cat "$entitlements_path"
+          else
+            echo 'Ad-hoc test signature contains no entitlements.'
           fi
 
-      - name: Create unsigned DMG
+          for forbidden_entitlement in \
+            com.apple.security.get-task-allow \
+            com.apple.security.app-sandbox; do
+            entitlement_value="$(
+              /usr/libexec/PlistBuddy \
+                -c "Print :$forbidden_entitlement" \
+                "$entitlements_path" 2>/dev/null || true
+            )"
+            if [[ "$entitlement_value" == "true" ]]; then
+              echo "::error::Ad-hoc signature contains $forbidden_entitlement=true"
+              exit 1
+            fi
+          done
+
+      - name: Create ad-hoc DMG
         run: >-
           hdiutil create
           -volname "Plana App"
@@ -199,6 +214,6 @@ jobs:
       - name: Upload macOS image
         uses: actions/upload-artifact@v7
         with:
-          name: Plana-macOS
+          name: Plana-macOS-ad-hoc
           path: Plana-macOS.dmg
           if-no-files-found: error

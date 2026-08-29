@@ -122,9 +122,11 @@ hdiutil create -volname "Plana App" \
 ```
 
 `feature/desktop-platforms` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
-上执行检查并生成 ZIP / DMG artifact。自动产物未使用 Windows 代码签名，也未使用
-Apple Developer ID 签名和公证，因此首次打开可能触发 SmartScreen 或 Gatekeeper；
-正式公开分发前应配置各平台签名凭证。
+上执行检查并生成 ZIP / DMG artifact。当前 macOS artifact 名为
+`Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,仅用于测试；它没有
+Apple Developer ID 签名和公证,首次打开仍会触发 Gatekeeper。正式公开分发必须使用
+Developer ID Application 证书重新签名,提交 Apple 公证并 staple 公证票据。Windows
+自动产物同样未使用代码签名,首次打开可能触发 SmartScreen。
 
 ```bash
 flutter analyze && flutter test
