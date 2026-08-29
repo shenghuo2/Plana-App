@@ -126,7 +126,7 @@ jobs:
           test "$executable_name" = "Plana App"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist_path")" = "11.0"
           codesign --verify --deep --strict --verbose=4 "$app_path"
-          codesign --display --entitlements :- "$app_path"
+          codesign --display --entitlements - "$app_path"
 
       - name: Create unsigned DMG
         run: >-
@@ -161,15 +161,28 @@ jobs:
           lipo -archs "$executable_path" | grep -qw arm64
           codesign --verify --deep --strict --verbose=4 "$app_path"
 
-          "$executable_path" >"$smoke_log" 2>&1 &
-          app_pid=$!
+          open -n -W -g "$app_path" >"$smoke_log" 2>&1 &
+          open_pid=$!
           sleep 8
-          if ! kill -0 "$app_pid" 2>/dev/null; then
+          if ! kill -0 "$open_pid" 2>/dev/null; then
             cat "$smoke_log"
-            wait "$app_pid"
+            log show --last 2m --style compact \
+              --predicate 'process == "Plana App" OR eventMessage CONTAINS[c] "com.sora214.plana.app"' \
+              | tail -200 || true
+            exit 1
           fi
+
+          app_pid="$(pgrep -x "$executable_name" | head -1)"
+          test -n "$app_pid"
           kill "$app_pid"
-          wait "$app_pid" || true
+          for _ in {1..20}; do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          kill -9 "$app_pid" 2>/dev/null || true
+          wait "$open_pid" || true
 
       - name: Upload macOS image
         uses: actions/upload-artifact@v7
