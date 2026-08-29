@@ -1,0 +1,242 @@
+name: Release Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - feature/cloud-storage-push
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.44.2
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  EXPECTED_SIGNER_SHA256: 81d38ce709ef64330dbd1b79663eb668fa982d3437b698308d2685a0e41e2978
+
+jobs:
+  prepare:
+    name: Validate release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate version and ref
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version_spec="$(sed -nE 's/^version:[[:space:]]*([^[:space:]#]+).*$/\1/p' pubspec.yaml)"
+          if [[ ! "$version_spec" =~ ^([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)\+([0-9]+)$ ]]; then
+            echo "Invalid version in pubspec.yaml: $version_spec" >&2
+            exit 1
+          fi
+
+          version="${BASH_REMATCH[1]}"
+          build_number="${BASH_REMATCH[3]}"
+          tag="v${version}"
+
+          if [[ "$GITHUB_REF_TYPE" != "branch" ]] || \
+             [[ "$GITHUB_REF_NAME" != "main" && "$GITHUB_REF_NAME" != "feature/cloud-storage-push" ]]; then
+            echo "Releases are only allowed from main or feature/cloud-storage-push." >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag $tag already exists." >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Verify and build signed APK
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Analyze
+        run: flutter analyze --no-pub
+
+      - name: Run tests
+        run: flutter test --no-pub --concurrency=1
+
+      - name: Restore release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required signing secret $name is not configured." >&2
+              exit 1
+            fi
+          done
+
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/plana-release.jks
+          {
+            printf 'storePassword=%s\n' "$STORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'storeFile=plana-release.jks\n'
+          } > android/key.properties
+
+          keytool -list \
+            -keystore android/plana-release.jks \
+            -storepass "$STORE_PASSWORD" \
+            -alias "$KEY_ALIAS" >/dev/null
+
+      - name: Build release APK
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --build-name "$RELEASE_VERSION" \
+            --build-number "$RELEASE_BUILD_NUMBER"
+
+      - name: Verify and stage APK
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apk="build/app/outputs/apk/release/Plana-${RELEASE_VERSION}-arm64-v8a.apk"
+          test -f "$apk"
+
+          build_tools="$ANDROID_SDK_ROOT/build-tools/36.0.0"
+          "$build_tools/zipalign" -c -P 16 4 "$apk"
+          "$build_tools/apksigner" verify --verbose --print-certs "$apk" | tee /tmp/apksigner.txt
+
+          grep -Fq "Verified using v2 scheme (APK Signature Scheme v2): true" /tmp/apksigner.txt
+          grep -Fq "Verified using v3 scheme (APK Signature Scheme v3): true" /tmp/apksigner.txt
+
+          signer_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' /tmp/apksigner.txt | head -n 1)"
+          signer_sha256="${signer_sha256//:/}"
+          signer_sha256="${signer_sha256,,}"
+          if [[ "$signer_sha256" != "$EXPECTED_SIGNER_SHA256" ]]; then
+            echo "Unexpected APK signing certificate: $signer_sha256" >&2
+            exit 1
+          fi
+
+          mkdir -p release
+          cp "$apk" release/
+          (
+            cd release
+            sha256sum "$(basename "$apk")" > SHA256SUMS.txt
+          )
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: plana-android-${{ needs.prepare.outputs.version }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: rm -f android/key.properties android/plana-release.jks
+
+  release:
+    name: Create GitHub release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download APK
+        uses: actions/download-artifact@v8
+        with:
+          name: plana-android-${{ needs.prepare.outputs.version }}
+          path: /tmp/release
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Plana App ${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          body: |
+            ## Android
+
+            - ABI: `arm64-v8a`
+            - Minimum Android version: Android 7.0 (API 24)
+            - Version code: `${{ needs.prepare.outputs.build_number }}`
+            - Signing certificate SHA-256: `${{ env.EXPECTED_SIGNER_SHA256 }}`
+
+            `SHA256SUMS.txt` contains the APK file checksum.
+          files: |
+            /tmp/release/*.apk
+            /tmp/release/SHA256SUMS.txt
