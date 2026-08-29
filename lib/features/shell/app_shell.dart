@@ -67,6 +67,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   /// 存下来并在 dispose 取消** —— 裸 `Future.delayed` 在页面提前销毁后照样会醒,
   /// 属于真实泄漏(widget 冒烟测试会直接报 pending timer)。
   void _scheduleAutoCheck() {
+    if (!isUpdateCheckSupported) return;
     final prefs = ref.read(prefsStoreProvider);
     if (!shouldAutoCheck(prefs)) return;
     _updateTimer = Timer(
@@ -149,46 +150,96 @@ class _AppShellState extends ConsumerState<AppShell> {
       ref.read(genNoticeProvider.notifier).clear();
     });
 
-    return Scaffold(
-      body: SafeArea(
-        bottom: false,
-        child: PageView(
-          controller: _pc,
-          // 只让程序 animateToPage 驱动;用户横滑一律不吃
-          physics: const NeverScrollableScrollPhysics(),
-          onPageChanged: (i) => ref.read(shellIndexProvider.notifier).select(i),
-          children: _pages,
-        ),
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: index,
-        // 重绘编辑中也允许点按切页(图库页 keep-alive,回来面板还在);
-        // 仅横滑仍锁(防抢涂抹手势)。
-        onDestinationSelected: (i) =>
-            ref.read(shellIndexProvider.notifier).select(i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.draw_outlined),
-            selectedIcon: Icon(Icons.draw),
-            label: '创作',
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final useRail = constraints.maxWidth >= 900;
+        final pages = SafeArea(
+          bottom: useRail,
+          child: PageView(
+            controller: _pc,
+            // 只让程序 animateToPage 驱动;用户横滑一律不吃
+            physics: const NeverScrollableScrollPhysics(),
+            onPageChanged: (i) =>
+                ref.read(shellIndexProvider.notifier).select(i),
+            children: _pages,
           ),
-          NavigationDestination(
-            icon: Icon(Icons.photo_library_outlined),
-            selectedIcon: Icon(Icons.photo_library),
-            label: '图库',
+        );
+
+        if (useRail) {
+          return Scaffold(
+            body: Row(
+              children: [
+                SafeArea(
+                  child: NavigationRail(
+                    selectedIndex: index,
+                    labelType: NavigationRailLabelType.all,
+                    groupAlignment: -0.82,
+                    onDestinationSelected: (i) =>
+                        ref.read(shellIndexProvider.notifier).select(i),
+                    destinations: const [
+                      NavigationRailDestination(
+                        icon: Icon(Icons.draw_outlined),
+                        selectedIcon: Icon(Icons.draw),
+                        label: Text('创作'),
+                      ),
+                      NavigationRailDestination(
+                        icon: Icon(Icons.photo_library_outlined),
+                        selectedIcon: Icon(Icons.photo_library),
+                        label: Text('图库'),
+                      ),
+                      NavigationRailDestination(
+                        icon: Icon(Icons.lightbulb_outline),
+                        selectedIcon: Icon(Icons.lightbulb),
+                        label: Text('灵感'),
+                      ),
+                      NavigationRailDestination(
+                        icon: Icon(Icons.person_outline),
+                        selectedIcon: Icon(Icons.person),
+                        label: Text('我的'),
+                      ),
+                    ],
+                  ),
+                ),
+                const VerticalDivider(width: 1),
+                Expanded(child: pages),
+              ],
+            ),
+          );
+        }
+
+        return Scaffold(
+          body: pages,
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: index,
+            // 重绘编辑中也允许点按切页(图库页 keep-alive,回来面板还在);
+            // 仅横滑仍锁(防抢涂抹手势)。
+            onDestinationSelected: (i) =>
+                ref.read(shellIndexProvider.notifier).select(i),
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.draw_outlined),
+                selectedIcon: Icon(Icons.draw),
+                label: '创作',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.photo_library_outlined),
+                selectedIcon: Icon(Icons.photo_library),
+                label: '图库',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.lightbulb_outline),
+                selectedIcon: Icon(Icons.lightbulb),
+                label: '灵感',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.person_outline),
+                selectedIcon: Icon(Icons.person),
+                label: '我的',
+              ),
+            ],
           ),
-          NavigationDestination(
-            icon: Icon(Icons.lightbulb_outline),
-            selectedIcon: Icon(Icons.lightbulb),
-            label: '灵感',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
-            label: '我的',
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -18,19 +19,23 @@ class _PrimedSettings extends GenSettingsNotifier {
   Future<GenSettings> build() async => const GenSettings(notifyPrimed: true);
 }
 
+Future<void> _pumpApp(WidgetTester tester) async {
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        appStoresProvider.overrideWithValue(AppStores.ephemeral()),
+        authModeProvider.overrideWith(_TokenMode.new),
+        genSettingsProvider.overrideWith(_PrimedSettings.new),
+      ],
+      child: const PlanaApp(),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('创作页冒烟:核心区块可见', (WidgetTester tester) async {
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          appStoresProvider.overrideWithValue(AppStores.ephemeral()),
-          authModeProvider.overrideWith(_TokenMode.new),
-          genSettingsProvider.overrideWith(_PrimedSettings.new),
-        ],
-        child: const PlanaApp(),
-      ),
-    );
-    await tester.pumpAndSettle();
+    await _pumpApp(tester);
 
     expect(find.text('提示词'), findsOneWidget);
     expect(find.text('角色'), findsOneWidget);
@@ -38,6 +43,21 @@ void main() {
     expect(find.text('创作'), findsOneWidget);
 
     // 放行工作台持久化的 800ms 防抖 Timer,避免拆树时报 pending timer
+    await tester.pump(const Duration(milliseconds: 900));
+  });
+
+  testWidgets('桌面宽度使用侧边导航', (WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await _pumpApp(tester);
+
+    expect(find.byType(NavigationRail), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+    expect(find.text('创作'), findsOneWidget);
+
     await tester.pump(const Duration(milliseconds: 900));
   });
 }

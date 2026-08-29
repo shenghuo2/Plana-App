@@ -7,7 +7,7 @@ library;
 /// 显示名。改这里要连 `android/app/src/main/AndroidManifest.xml` 的
 /// `android:label` 一起改 —— 那个是桌面图标下的名字,读不到 Dart 常量。
 const kAppName = 'Plana App';
-const kAppTagline = 'NovelAI 移动创作端';
+const kAppTagline = 'NovelAI 创作客户端';
 const kAppVersion = '1.0.7';
 const kAppBuild = '13';
 
