@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_info.dart';
 import '../../core/auth/bot_session_store.dart';
 import '../../core/auth/nai_credential_login.dart';
 import '../../core/auth/token_store.dart';
@@ -67,6 +68,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   /// 存下来并在 dispose 取消** —— 裸 `Future.delayed` 在页面提前销毁后照样会醒,
   /// 属于真实泄漏(widget 冒烟测试会直接报 pending timer)。
   void _scheduleAutoCheck() {
+    if (kUpdateGithubRepo.isEmpty) return;
     final prefs = ref.read(prefsStoreProvider);
     if (!shouldAutoCheck(prefs)) return;
     _updateTimer = Timer(

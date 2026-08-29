@@ -1,5 +1,5 @@
 name: plana_app
-description: "Plana NovelAI mobile client"
+description: "Plana App fork with external image push support"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -23,8 +23,8 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 #
 # 改这里必须同步改 lib/core/app_info.dart 的 kAppVersion / kAppBuild
 # (test/app_info_test.dart 会钉住,对不上直接红)。
-# GitHub 上打的 tag 用 `v1.0.0` —— 检查更新按语义化版本比 tag 与本机 versionName。
-version: 1.0.7+13
+# 定制版使用独立签名和版本后缀;更新源在 lib/core/app_info.dart 中单独配置。
+version: 1.0.7-patch-s.2+14
 
 environment:
   sdk: ^3.12.2

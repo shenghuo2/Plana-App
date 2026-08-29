@@ -175,7 +175,7 @@ Future<InstalledInfo> installedInfo() async {
 /// [repo] 为空(尚未开源/没填仓库)时直接返回 null,不报错。
 Future<GithubRelease?> fetchLatestRelease(
   String current, {
-  String repo = kGithubRepo,
+  String repo = kUpdateGithubRepo,
 }) async {
   if (repo.isEmpty || current.isEmpty) return null;
   try {

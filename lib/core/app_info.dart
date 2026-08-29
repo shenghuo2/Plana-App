@@ -8,8 +8,8 @@ library;
 /// `android:label` 一起改 —— 那个是桌面图标下的名字,读不到 Dart 常量。
 const kAppName = 'Plana App';
 const kAppTagline = 'NovelAI 移动创作端';
-const kAppVersion = '1.0.7';
-const kAppBuild = '13';
+const kAppVersion = '1.0.7-patch-s.2';
+const kAppBuild = '14';
 
 /// 预发布版(版号带 `-`):关于页加内测标,免得测试反馈回来分不清版本。
 bool get kIsPrerelease => kAppVersion.contains('-');
@@ -36,12 +36,17 @@ const kNovelAiUrl = 'https://novelai.net/';
 /// 两种都不如「复制群号,自己去搜」来得稳。
 const kQqGroupId = '1078261982';
 
-/// GitHub 仓库(`owner/repo`),「检查更新」据此查 Releases,关于页据此显示源码入口。
+/// 当前定制版的 GitHub 仓库(`owner/repo`),关于页据此显示源码入口。
+const kGithubRepo = 'shenghuo2/Plana-App';
+
+/// 原项目仓库。定制版继续保留上游出处,但不从这里检查更新。
+const kUpstreamGithubRepo = 'mc5024/Plana-App';
+
+/// 用于检查 Release 的 GitHub 仓库(`owner/repo`)。
 ///
-/// **开源发布后把仓库名填在这里 —— 只此一处。** 留空时检查更新显示「暂无更新信息」、
-/// 关于页不显示源码行,都不报错。填了之后应用只做两件事:比版本、把用户送去
-/// Release 页;下载和安装始终交给浏览器与系统。
-const kGithubRepo = 'mc5024/Plana-App';
+/// 定制包使用独立签名,不能直接覆盖上游 APK,因此保持为空以完全关闭更新检查。
+/// 若未来发布同签名的 fork Release,只在这里填入该 fork 仓库。
+const kUpdateGithubRepo = '';
 
 /// 本项目的许可证。GPL-3.0:分发修改版(含打包成 APK 分发)必须同样开源。
 const kLicense = 'GPL-3.0';
@@ -50,6 +55,7 @@ const kLicenseUrl = 'https://www.gnu.org/licenses/gpl-3.0.html';
 /// 版权与免责,用于 `showLicensePage` 的 legalese 区。
 const kLegalese =
     'Copyright (C) 2026 Sora_Light\n\n'
+    'Copyright (C) 2026 shenghuo2 (modifications)\n\n'
     '本程序是自由软件,依据 GNU GPL v3 或更新版本分发。'
     '分发本程序是希望它有用,但不作任何担保。\n\n'
     '$kAppName 是第三方客户端,与 NovelAI 官方无关联。';
