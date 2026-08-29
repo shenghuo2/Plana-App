@@ -100,6 +100,22 @@ flutter analyze && flutter test
 约 8 万行 Dart、60 个测试文件 / 660 个用例。分词器、Anlas 公式、Vibe 哈希口径、
 NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即失败。
 
+### GitHub Actions 发布
+
+`.github/workflows/release-apk.yml` 会运行静态分析与完整测试,使用固定发布密钥构建
+`arm64-v8a` APK,校验 zipalign、v2/v3 签名与证书指纹,最后创建 GitHub Release。
+
+仓库需要配置以下 GitHub Actions Secrets,密钥文件与密码不得提交到 Git:
+
+- `ANDROID_KEYSTORE_BASE64`: `android/plana-release.jks` 的 Base64 内容
+- `ANDROID_STORE_PASSWORD`: JKS 密码
+- `ANDROID_KEY_ALIAS`: 发布密钥别名
+- `ANDROID_KEY_PASSWORD`: 发布私钥密码
+
+推送到 `main` 或 `feature/cloud-storage-push` 时会自动构建并发布,`dev` 分支不会触发。
+工作流以 `pubspec.yaml` 中的版本创建 tag(例如 `v1.0.7-patch-s.2`);已存在同名 tag
+时拒绝重复发布。固定签名证书不匹配时也会立即终止,不会发布误签名 APK。
+
 ## 致谢与出处
 
 本项目站在这些工作之上。
