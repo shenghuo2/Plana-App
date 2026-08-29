@@ -110,8 +110,8 @@ flutter build windows --release --no-pub
 
 完整 Windows 目录位于 `build/windows/x64/runner/Release/`,入口是 `Plana.exe`。
 
-macOS 构建需要 macOS 11 以上和 Xcode。应用已声明网络、照片图库、用户选择文件与
-Keychain 权限。
+macOS 构建需要 macOS 11 以上和 Xcode。Release 构建采用非沙箱模式,凭据写入当前
+用户的 macOS 登录钥匙串,不依赖 Keychain Sharing entitlement 或 Apple 开发者证书。
 
 ```bash
 flutter pub get --enforce-lockfile
@@ -123,10 +123,11 @@ hdiutil create -volname "Plana App" \
 
 `feature/desktop-platforms` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
 上执行检查并生成 ZIP / DMG artifact。当前 macOS artifact 名为
-`Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,仅用于测试；它没有
-Apple Developer ID 签名和公证,首次打开仍会触发 Gatekeeper。正式公开分发必须使用
-Developer ID Application 证书重新签名,提交 Apple 公证并 staple 公证票据。Windows
-自动产物同样未使用代码签名,首次打开可能触发 SmartScreen。
+`Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,并在打包时实际验证
+登录钥匙串的写入、读取和删除。它没有 Apple Developer ID 签名和公证,首次打开仍会
+触发 Gatekeeper,但 Token 与 Bot 会话可以正常安全保存。若需消除系统的未认证开发者
+警告,仍只能使用 Developer ID Application 签名并完成 Apple 公证。Windows 自动产物
+同样未使用代码签名,首次打开可能触发 SmartScreen。
 
 ```bash
 flutter analyze && flutter test

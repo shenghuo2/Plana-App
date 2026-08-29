@@ -123,11 +123,10 @@ jobs:
             fi
           done < <(find "$app_path" -type f -print0)
 
-          # GitHub-hosted builds have no Developer ID certificate. Xcode's
-          # sandbox entitlements require a trusted certificate chain, so the
-          # downloadable test build must use an entitlement-free ad-hoc
-          # signature. A public release must replace this with Developer ID
-          # signing and notarization.
+          # GitHub-hosted builds have no Developer ID certificate. Release is
+          # intentionally non-sandboxed and uses the classic login Keychain,
+          # so the downloadable build can use an entitlement-free ad-hoc
+          # signature without losing credential storage.
           codesign --force --sign - "$app_path"
 
           test -x "$executable_path"
@@ -154,6 +153,26 @@ jobs:
               exit 1
             fi
           done
+
+          keychain_smoke_log="$RUNNER_TEMP/plana-keychain-smoke.log"
+          PLANA_MACOS_KEYCHAIN_SMOKE_TEST=1 \
+            "$executable_path" >"$keychain_smoke_log" 2>&1 &
+          keychain_smoke_pid=$!
+          (
+            sleep 20
+            kill -TERM "$keychain_smoke_pid" 2>/dev/null || true
+          ) &
+          keychain_watchdog_pid=$!
+
+          keychain_smoke_status=0
+          wait "$keychain_smoke_pid" || keychain_smoke_status=$?
+          kill "$keychain_watchdog_pid" 2>/dev/null || true
+          wait "$keychain_watchdog_pid" 2>/dev/null || true
+          cat "$keychain_smoke_log"
+          if [[ "$keychain_smoke_status" -ne 0 ]]; then
+            echo "::error::macOS Keychain smoke test failed with status $keychain_smoke_status"
+            exit 1
+          fi
 
       - name: Create ad-hoc DMG
         run: >-
