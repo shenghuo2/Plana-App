@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -48,7 +48,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -71,7 +71,7 @@ jobs:
           -DestinationPath "Plana-Windows-x64.zip"
 
       - name: Upload Windows bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Plana-Windows-x64
           path: Plana-Windows-x64.zip
@@ -84,7 +84,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -99,6 +99,35 @@ jobs:
       - name: Build release app
         run: flutter build macos --release --no-pub
 
+      - name: Validate macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="build/macos/Build/Products/Release/Plana App.app"
+          plist_path="$app_path/Contents/Info.plist"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist_path")"
+          executable_path="$app_path/Contents/MacOS/$executable_name"
+
+          # Disk images retain POSIX modes. Keep the bundle usable when the
+          # mounted volume's numeric owner differs from the local macOS user.
+          chmod -R a+rX "$app_path"
+
+          while IFS= read -r -d '' candidate; do
+            if file "$candidate" | grep -q 'Mach-O'; then
+              chmod a+x "$candidate"
+              architectures="$(lipo -archs "$candidate")"
+              echo "$candidate: $architectures"
+              grep -qw arm64 <<<"$architectures"
+            fi
+          done < <(find "$app_path" -type f -print0)
+
+          test -x "$executable_path"
+          test "$executable_name" = "Plana App"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist_path")" = "11.0"
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+          codesign --display --entitlements :- "$app_path"
+
       - name: Create unsigned DMG
         run: >-
           hdiutil create
@@ -108,8 +137,42 @@ jobs:
           -format UDZO
           "Plana-macOS.dmg"
 
+      - name: Validate packaged macOS image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mount_point="$(mktemp -d)"
+          smoke_log="$RUNNER_TEMP/plana-macos-smoke.log"
+          cleanup() {
+            hdiutil detach "$mount_point" || true
+            rmdir "$mount_point" || true
+          }
+          trap cleanup EXIT
+
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "Plana-macOS.dmg"
+          app_path="$mount_point/Plana App.app"
+          plist_path="$app_path/Contents/Info.plist"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist_path")"
+          executable_path="$app_path/Contents/MacOS/$executable_name"
+
+          test -x "$executable_path"
+          file "$executable_path"
+          lipo -archs "$executable_path" | grep -qw arm64
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+
+          "$executable_path" >"$smoke_log" 2>&1 &
+          app_pid=$!
+          sleep 8
+          if ! kill -0 "$app_pid" 2>/dev/null; then
+            cat "$smoke_log"
+            wait "$app_pid"
+          fi
+          kill "$app_pid"
+          wait "$app_pid" || true
+
       - name: Upload macOS image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Plana-macOS
           path: Plana-macOS.dmg
