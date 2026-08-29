@@ -27,6 +27,7 @@ jobs:
       build_number: ${{ steps.version.outputs.build_number }}
       tag: ${{ steps.version.outputs.tag }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      should_release: ${{ steps.version.outputs.should_release }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -55,14 +56,16 @@ jobs:
             echo "Releases are only allowed from main or feature/cloud-storage-push." >&2
             exit 1
           fi
+          should_release="true"
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag $tag already exists." >&2
-            exit 1
+            echo "Tag $tag already exists; the APK will only be uploaded as a workflow artifact."
+            should_release="false"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
           if [[ "$version" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -203,6 +206,7 @@ jobs:
   release:
     name: Create GitHub release
     needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
