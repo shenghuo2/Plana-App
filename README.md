@@ -121,8 +121,9 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 - `ANDROID_KEY_PASSWORD`: 发布私钥密码
 
 推送到 `main` 或 `feature/cloud-storage-push` 时会自动构建并发布,`dev` 分支不会触发。
-工作流以 `pubspec.yaml` 中的版本创建 tag(例如 `v1.0.7-patch-s.2`);已存在同名 tag
-时拒绝重复发布。固定签名证书不匹配时也会立即终止,不会发布误签名 APK。
+工作流以 `pubspec.yaml` 中的版本创建 tag(例如 `v1.0.7-patch-s.2`);已有同名 tag 时
+仍会构建并保留 Actions artifact,但不重复创建 Release。固定签名证书不匹配时也会
+立即终止,不会发布误签名 APK。
 
 ## 致谢与出处
 
