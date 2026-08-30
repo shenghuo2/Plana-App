@@ -165,10 +165,14 @@ class _AppShellState extends ConsumerState<AppShell> {
           ),
         );
 
-        if (useRail) {
-          return Scaffold(
-            body: Row(
-              children: [
+        return Scaffold(
+          // PageView 必须在断点两侧留在同一 element 位置。把它分别放进
+          // rail / bottom-nav 两棵 Scaffold 子树会在窗口跨过 900px 时重建:
+          // provider 还停在图库,新 PageView 却从 initialPage=0 起步,于是导航
+          // 高亮图库、画面卡在创作,再次点图库也不会产生状态变化。
+          body: Row(
+            children: [
+              if (useRail)
                 SafeArea(
                   child: NavigationRail(
                     selectedIndex: index,
@@ -200,44 +204,41 @@ class _AppShellState extends ConsumerState<AppShell> {
                     ],
                   ),
                 ),
-                const VerticalDivider(width: 1),
-                Expanded(child: pages),
-              ],
-            ),
-          );
-        }
-
-        return Scaffold(
-          body: pages,
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: index,
-            // 重绘编辑中也允许点按切页(图库页 keep-alive,回来面板还在);
-            // 仅横滑仍锁(防抢涂抹手势)。
-            onDestinationSelected: (i) =>
-                ref.read(shellIndexProvider.notifier).select(i),
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.draw_outlined),
-                selectedIcon: Icon(Icons.draw),
-                label: '创作',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.photo_library_outlined),
-                selectedIcon: Icon(Icons.photo_library),
-                label: '图库',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.lightbulb_outline),
-                selectedIcon: Icon(Icons.lightbulb),
-                label: '灵感',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.person_outline),
-                selectedIcon: Icon(Icons.person),
-                label: '我的',
-              ),
+              if (useRail) const VerticalDivider(width: 1),
+              Expanded(key: const ValueKey('shell-pages'), child: pages),
             ],
           ),
+          bottomNavigationBar: useRail
+              ? null
+              : NavigationBar(
+                  selectedIndex: index,
+                  // 重绘编辑中也允许点按切页(图库页 keep-alive,回来面板还在);
+                  // 仅横滑仍锁(防抢涂抹手势)。
+                  onDestinationSelected: (i) =>
+                      ref.read(shellIndexProvider.notifier).select(i),
+                  destinations: const [
+                    NavigationDestination(
+                      icon: Icon(Icons.draw_outlined),
+                      selectedIcon: Icon(Icons.draw),
+                      label: '创作',
+                    ),
+                    NavigationDestination(
+                      icon: Icon(Icons.photo_library_outlined),
+                      selectedIcon: Icon(Icons.photo_library),
+                      label: '图库',
+                    ),
+                    NavigationDestination(
+                      icon: Icon(Icons.lightbulb_outline),
+                      selectedIcon: Icon(Icons.lightbulb),
+                      label: '灵感',
+                    ),
+                    NavigationDestination(
+                      icon: Icon(Icons.person_outline),
+                      selectedIcon: Icon(Icons.person),
+                      label: '我的',
+                    ),
+                  ],
+                ),
         );
       },
     );
