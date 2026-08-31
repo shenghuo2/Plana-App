@@ -1,12 +1,18 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plana_app/core/app_info.dart';
 import 'package:plana_app/core/store/prefs_store.dart';
 import 'package:plana_app/features/update/update_service.dart';
 
 /// 更新判定的纯逻辑。错了不会崩,只会"永远不提示"或"反复提示已装的版本" ——
 /// 两种都是用户不会报、你也看不见的静默故障,所以钉在这里。
 void main() {
+  test('定制包只从同签名 fork 检查更新', () {
+    expect(kUpdateGithubRepo, 'shenghuo2/Plana-App');
+    expect(kUpdateGithubRepo, isNot(kGithubRepo));
+  });
+
   group('compareSemver', () {
     void newer(String a, String b) {
       expect(compareSemver(a, b), greaterThan(0), reason: '$a 应比 $b 新');
@@ -121,6 +127,90 @@ void main() {
     test('展示名:release 标题为空时回落到 tag', () {
       final r = pickNewer('1.0.0', [rel('v1.2.0')]);
       expect(r?.display, 'v1.2.0');
+    });
+  });
+
+  group('release assets', () {
+    GithubRelease release(List<GithubAsset> assets) => GithubRelease(
+      tag: 'v1.1.0-patch-s.1',
+      name: '',
+      notes: '',
+      url: 'https://github.com/x/y/releases/tag/v1.1.0-patch-s.1',
+      prerelease: true,
+      assets: assets,
+    );
+
+    const apk = GithubAsset(
+      name: 'Plana-1.1.0-patch-s.1-arm64-v8a.apk',
+      url: 'https://github.com/x/y/releases/download/v1.1.0/app.apk',
+      size: 123,
+    );
+    const sums = GithubAsset(
+      name: 'SHA256SUMS.txt',
+      url: 'https://github.com/x/y/releases/download/v1.1.0/SHA256SUMS.txt',
+      size: 100,
+    );
+
+    test('只选择唯一的 arm64 APK 与校验文件', () {
+      final r = release([
+        const GithubAsset(
+          name: 'Plana-windows.zip',
+          url: 'https://github.com/x/y/windows.zip',
+          size: 1,
+        ),
+        apk,
+        sums,
+      ]);
+      expect(findAndroidApk(r), same(apk));
+      expect(findChecksumAsset(r), same(sums));
+    });
+
+    test('多个 arm64 APK 时拒绝猜测', () {
+      expect(
+        findAndroidApk(
+          release([
+            apk,
+            const GithubAsset(
+              name: 'Plana-other-arm64-v8a.apk',
+              url: 'https://github.com/x/y/other.apk',
+              size: 123,
+            ),
+          ]),
+        ),
+        isNull,
+      );
+    });
+
+    test('解析 sha256sum 标准格式并精确匹配文件名', () {
+      const digest =
+          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+      expect(checksumForAsset('$digest  ${apk.name}\n', apk.name), digest);
+      expect(checksumForAsset('$digest *${apk.name}\n', apk.name), digest);
+      expect(checksumForAsset('$digest  other.apk\n', apk.name), isNull);
+    });
+
+    test('Release JSON 忽略非 HTTPS 资产', () {
+      final parsed = GithubRelease.fromJson({
+        'tag_name': 'v1.1.0',
+        'html_url': 'https://github.com/x/y/releases/tag/v1.1.0',
+        'assets': [
+          {
+            'name': apk.name,
+            'browser_download_url': 'http://example.com/app.apk',
+            'size': 123,
+          },
+          {
+            'name': sums.name,
+            'browser_download_url': sums.url,
+            'size': sums.size,
+          },
+        ],
+      });
+      expect(parsed, isNotNull);
+      expect(parsed!.assets, hasLength(1));
+      expect(parsed.assets.single.name, sums.name);
+      expect(parsed.assets.single.url, sums.url);
+      expect(parsed.assets.single.size, sums.size);
     });
   });
 

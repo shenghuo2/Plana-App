@@ -8,8 +8,8 @@ library;
 /// `android:label` 一起改 —— 那个是桌面图标下的名字,读不到 Dart 常量。
 const kAppName = 'Plana App';
 const kAppTagline = 'NovelAI 移动创作端';
-const kAppVersion = '1.0.8';
-const kAppBuild = '14';
+const kAppVersion = '1.0.8-patch-s.1';
+const kAppBuild = '15';
 
 /// 预发布版(版号带 `-`):关于页加内测标,免得测试反馈回来分不清版本。
 bool get kIsPrerelease => kAppVersion.contains('-');
@@ -36,12 +36,12 @@ const kNovelAiUrl = 'https://novelai.net/';
 /// 两种都不如「复制群号,自己去搜」来得稳。
 const kQqGroupId = '1078261982';
 
-/// GitHub 仓库(`owner/repo`),「检查更新」据此查 Releases,关于页据此显示源码入口。
-///
-/// **开源发布后把仓库名填在这里 —— 只此一处。** 留空时检查更新显示「暂无更新信息」、
-/// 关于页不显示源码行,都不报错。填了之后应用只做两件事:比版本、把用户送去
-/// Release 页;下载和安装始终交给浏览器与系统。
+/// 上游源码仓库(`owner/repo`),关于页据此显示源码入口。
 const kGithubRepo = 'mc5024/Plana-App';
+
+/// 同签名定制包的更新仓库。更新器只能从这里取 APK,不能改回上游仓库:
+/// 两边签名不同,下载上游包后 Android 会拒绝覆盖安装。
+const kUpdateGithubRepo = 'shenghuo2/Plana-App';
 
 /// 本项目的许可证。GPL-3.0:分发修改版(含打包成 APK 分发)必须同样开源。
 const kLicense = 'GPL-3.0';

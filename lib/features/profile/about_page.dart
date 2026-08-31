@@ -151,8 +151,7 @@ class AboutPage extends StatelessWidget {
           const SettingsLabel('法律'),
           SettingsCard(
             children: [
-              // 填了 kGithubRepo 才出现 —— 同一个常量也驱动「检查更新」,
-              // 一处配置点亮两个功能,不会出现"有源码入口但查不了更新"的错位
+              // 源码出处与同签名更新源是两个边界,不能为了省一个常量混在一起。
               if (kGithubRepo.isNotEmpty)
                 SettingsRow(
                   icon: Icons.code,

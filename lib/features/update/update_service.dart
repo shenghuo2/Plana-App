@@ -1,9 +1,4 @@
-/// 检查更新(只检查,不下载不安装)。
-///
-/// 链路:GitHub Releases API 拿最新 release → 按语义化版本比 → 有新版就提示,
-/// 用户点「去下载」跳外部浏览器打开 Release 页。**下载与安装交给浏览器和系统**,
-/// 本应用不碰 —— 所以既不需要 `REQUEST_INSTALL_PACKAGES`,也不需要 FileProvider,
-/// 更不需要自己校验安装包。
+/// GitHub Release 更新检查与 Android 安装通道。
 library;
 
 import 'dart:async';
@@ -41,6 +36,38 @@ class InstalledInfo {
   bool get isKnown => versionName.isNotEmpty;
 }
 
+/// GitHub Release 附带的单个文件。
+class GithubAsset {
+  const GithubAsset({
+    required this.name,
+    required this.url,
+    required this.size,
+  });
+
+  final String name;
+  final String url;
+  final int size;
+
+  static GithubAsset? fromJson(Map<String, dynamic> j) {
+    final name = j['name'] as String?;
+    final url = j['browser_download_url'] as String?;
+    final uri = url == null ? null : Uri.tryParse(url);
+    if (name == null ||
+        name.isEmpty ||
+        url == null ||
+        uri == null ||
+        uri.scheme != 'https' ||
+        uri.host.isEmpty) {
+      return null;
+    }
+    return GithubAsset(
+      name: name,
+      url: url,
+      size: (j['size'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
 /// GitHub 的一条 release。
 class GithubRelease {
   const GithubRelease({
@@ -49,6 +76,7 @@ class GithubRelease {
     required this.notes,
     required this.url,
     required this.prerelease,
+    this.assets = const [],
   });
 
   /// 形如 `v1.0.0-beta.2`(比较时会剥掉前导 v)。
@@ -59,6 +87,7 @@ class GithubRelease {
   /// Release 页地址,用户点「去下载」时用浏览器打开。
   final String url;
   final bool prerelease;
+  final List<GithubAsset> assets;
 
   /// 展示名:GitHub 上 release 标题常留空,回落到 tag。
   String get display => name.isNotEmpty ? name : tag;
@@ -68,12 +97,22 @@ class GithubRelease {
     final tag = j['tag_name'] as String?;
     final url = j['html_url'] as String?;
     if (tag == null || tag.isEmpty || url == null || url.isEmpty) return null;
+    final rawAssets = j['assets'];
+    final assets = <GithubAsset>[];
+    if (rawAssets is List) {
+      for (final raw in rawAssets) {
+        if (raw is! Map<String, dynamic>) continue;
+        final asset = GithubAsset.fromJson(raw);
+        if (asset != null) assets.add(asset);
+      }
+    }
     return GithubRelease(
       tag: tag,
       name: (j['name'] as String?) ?? '',
       notes: (j['body'] as String?) ?? '',
       url: url,
       prerelease: j['prerelease'] == true,
+      assets: assets,
     );
   }
 }
@@ -175,7 +214,7 @@ Future<InstalledInfo> installedInfo() async {
 /// [repo] 为空(尚未开源/没填仓库)时直接返回 null,不报错。
 Future<GithubRelease?> fetchLatestRelease(
   String current, {
-  String repo = kGithubRepo,
+  String repo = kUpdateGithubRepo,
 }) async {
   if (repo.isEmpty || current.isEmpty) return null;
   try {
@@ -209,6 +248,36 @@ Future<GithubRelease?> fetchLatestRelease(
     logd('[update] 检查更新异常: $e');
     throw const UpdateException('检查更新失败,请稍后重试');
   }
+}
+
+/// 从 Release 中找唯一的 arm64 Android 安装包。
+///
+/// 不回落到任意 `.apk`:同一 Release 将来可能同时带桌面包、universal 或其他
+/// ABI,猜错后既浪费流量又只会在安装器里失败。
+GithubAsset? findAndroidApk(GithubRelease release) {
+  final matches = release.assets.where((asset) {
+    final name = asset.name.toLowerCase();
+    return name.endsWith('.apk') && name.contains('arm64-v8a');
+  }).toList();
+  return matches.length == 1 ? matches.single : null;
+}
+
+GithubAsset? findChecksumAsset(GithubRelease release) {
+  final matches = release.assets
+      .where((asset) => asset.name.toLowerCase() == 'sha256sums.txt')
+      .toList();
+  return matches.length == 1 ? matches.single : null;
+}
+
+/// 解析 `sha256sum` 标准输出,只返回指定文件的摘要。
+String? checksumForAsset(String contents, String assetName) {
+  final pattern = RegExp(r'^([0-9a-fA-F]{64})\s+\*?(.+)$');
+  for (final line in const LineSplitter().convert(contents)) {
+    final match = pattern.firstMatch(line.trim());
+    if (match == null || match.group(2) != assetName) continue;
+    return match.group(1)!.toLowerCase();
+  }
+  return null;
 }
 
 /// 从 release 列表里挑出比 [current] 新的那个(纯逻辑,单独抽出来可测)。
