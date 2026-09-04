@@ -7,13 +7,22 @@
 **NovelAI 第三方 Android 客户端** —— 可能是最舒适的 AI 绘图移动创作端
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/mc5024/Plana-App?label=release)](https://github.com/mc5024/Plana-App/releases)
+[![Fork](https://img.shields.io/badge/fork-shenghuo2%2FPlana--App-181717?logo=github)](https://github.com/shenghuo2/Plana-App)
+[![Upstream](https://img.shields.io/badge/upstream-mc5024%2FPlana--App-555?logo=github)](https://github.com/mc5024/Plana-App)
 [![Android](https://img.shields.io/badge/Android-7.0%2B-3ddc84?logo=android&logoColor=white)](#构建)
 [![Flutter](https://img.shields.io/badge/built%20with-Flutter-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
 
 </div>
 
 ---
+
+> **签名提醒:** 本仓库发布的 APK 使用与上游 `mc5024/Plana-App` 不同的签名。
+> 在标准 Android 安装机制下,两者无法相互覆盖安装或升级。需要切换时请先备份数据再卸载旧应用;
+> 卸载应用会删除其本地应用数据。
+
+本仓库是 [mc5024/Plana-App](https://github.com/mc5024/Plana-App) 的定制分支。
+当前版本增加了向自建图片管理服务推送图库原图的能力。定制 APK 使用独立签名,
+并已关闭上游 Release 更新检查,避免提示无法直接覆盖安装的官方版本。
 
 ## 亮点
 
@@ -32,6 +41,9 @@
 
 - **本地图库** 原图与参数快照本地留存,可按模型与标签检索,导出时元数据可保留、清除或改写;
   支持按住抬起预览、胶片条拖至垃圾条删除、网格多选批量操作
+
+- **云存储推送** 在「我的 → 云存储」配置兼容的 API 地址与 Token 后,可从图库结果页将原图
+  直接推送到远端图片管理服务;上传保持原始图片字节,不经过转码
 
 - **素材库** 灵感库按角色 / 画风 / 场景归类存储并可生成预览图;Vibe 库支持 `.naiv4vibe` 导入导出与逐模型编码管理;
   角色参考图库留存用过的参考图
@@ -77,9 +89,9 @@ NAI 网页端的常规能力 —— 多角色与位置、Vibe Transfer、角色�
 
 ## 交流与反馈
 
-QQ 群:**1078261982**
+上游 QQ 交流群:**1078261982**
 
-Bug 与功能建议走 [Issues](https://github.com/mc5024/Plana-App/issues)。
+定制版 Bug 与功能建议走 [Issues](https://github.com/shenghuo2/Plana-App/issues)。
 
 ## 构建
 
@@ -96,8 +108,25 @@ flutter build apk --release --target-platform android-arm64
 flutter analyze && flutter test
 ```
 
-约 8 万行 Dart、60 个测试文件 / 660 个用例。分词器、Anlas 公式、Vibe 哈希口径、
+约 8 万行 Dart、60 个测试文件 / 669 个用例。分词器、Anlas 公式、Vibe 哈希口径、
 NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即失败。
+
+### GitHub Actions 发布
+
+`.github/workflows/release-apk.yml` 会运行静态分析与完整测试,使用固定发布密钥构建
+`arm64-v8a` APK,校验 zipalign、v2/v3 签名与证书指纹,最后创建 GitHub Release。
+
+仓库需要配置以下 GitHub Actions Secrets,密钥文件与密码不得提交到 Git:
+
+- `ANDROID_KEYSTORE_BASE64`: `android/plana-release.jks` 的 Base64 内容
+- `ANDROID_STORE_PASSWORD`: JKS 密码
+- `ANDROID_KEY_ALIAS`: 发布密钥别名
+- `ANDROID_KEY_PASSWORD`: 发布私钥密码
+
+推送到 `main` 或 `feature/cloud-storage-push` 时会自动构建并发布,`dev` 分支不会触发。
+工作流以 `pubspec.yaml` 中的版本创建 tag(例如 `v1.0.7-patch-s.2`);已有同名 tag 时
+仍会构建并保留 Actions artifact,但不重复创建 Release。固定签名证书不匹配时也会
+立即终止,不会发布误签名 APK。
 
 ## 致谢与出处
 
@@ -107,6 +136,7 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 
 | 来源 | 用途 |
 |---|---|
+| [mc5024/Plana-App](https://github.com/mc5024/Plana-App) · Sora_Light | 原项目代码、产品设计与移动端实现 |
 | [Danbooru](https://danbooru.donmai.us/) | 标签体系与别名数据 |
 | [Auto-NovelAI-Refactor](https://github.com/zhulinyv/Auto-NovelAI-Refactor) · zhulinyv | 离线补全词库(`assets/danbooru.tsv`,随包分发)的标签表、热度与绝大部分中文译名,取自其 `danbooru_e621_merged_with_zh.csv`(GPL-3.0) |
 | [DanbooruSearchOnline](https://github.com/SuzumiyaAkizuki/DanbooruSearchOnline) · SuzumiyaAkizuki | 增强补全的在线中文搜词、译名与一句话简介 |
@@ -148,6 +178,8 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 ## 许可
 
 Copyright (C) 2026 Sora_Light
+
+Copyright (C) 2026 shenghuo2 (modifications)
 
 本项目以 GPL-3.0 发布,全文见 [LICENSE](LICENSE)。分发修改版(含打包成 APK 分发)
 须同样以 GPL-3.0 开源;本程序不作任何担保。

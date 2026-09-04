@@ -1,5 +1,5 @@
 name: plana_app
-description: "Plana NovelAI mobile client"
+description: "Plana App fork with external image push support"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -23,8 +23,8 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 #
 # 改这里必须同步改 lib/core/app_info.dart 的 kAppVersion / kAppBuild
 # (test/app_info_test.dart 会钉住,对不上直接红)。
-# GitHub 上打的 tag 用 `v1.0.0` —— 检查更新按语义化版本比 tag 与本机 versionName。
-version: 1.0.8+14
+# 定制版使用独立签名和版本后缀;更新源在 lib/core/app_info.dart 中单独配置。
+version: 1.0.8-patch-s.3+16
 
 environment:
   sdk: ^3.12.2
@@ -50,7 +50,8 @@ dependencies:
   # 账号密码登录:NAI access key 派生要 Blake2b + Argon2id,上面的 crypto
   # 包只有 SHA 系没有这俩;纯 Dart 实现,无原生依赖。
   cryptography: ^2.7.0
-  photo_manager: ^3.7.0
+  # 3.10.0 无法通过当前 Kotlin 2.3.20 编译;3.12.0 已完成 Android release 构建验证。
+  photo_manager: ^3.12.0
   photo_manager_image_provider: ^2.2.0
   path_provider: ^2.1.6
   gal: ^2.3.2

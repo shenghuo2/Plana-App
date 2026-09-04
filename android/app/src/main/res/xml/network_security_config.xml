@@ -19,6 +19,9 @@
         <domain includeSubdomains="true">10.0.0.0/8</domain>
         <domain includeSubdomains="true">172.16.0.0/12</domain>
         <domain includeSubdomains="true">192.168.0.0/16</domain>
+        <!-- 当前 pic-manager 的局域网示例地址。Android 的 domain 规则不能
+             将 CIDR 当作 IP 范围匹配,因此保留一个可实际命中的主机。 -->
+        <domain includeSubdomains="false">192.168.123.154</domain>
         <domain includeSubdomains="true">local</domain>
     </domain-config>
 </network-security-config>

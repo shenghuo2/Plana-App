@@ -11,6 +11,7 @@ import '../tools/tools_page.dart';
 import 'about_page.dart';
 import 'account_page.dart';
 import 'appearance_page.dart';
+import 'cloud_storage_page.dart';
 import 'gen_settings_page.dart';
 import 'storage_page.dart';
 
@@ -72,6 +73,13 @@ class ProfilePage extends ConsumerWidget {
                   title: '账号与接入',
                   subtitle: 'Token 与 Bot 授权',
                   onTap: () => push(const AccountPage()),
+                ),
+                const SizedBox(height: 10),
+                _EntryCard(
+                  icon: Icons.cloud_outlined,
+                  title: '云存储',
+                  subtitle: '远端图库推送',
+                  onTap: () => push(const CloudStoragePage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(

@@ -88,9 +88,11 @@ class AboutPage extends StatelessWidget {
               ],
             ),
           ),
-          const SettingsLabel('版本'),
-          const SettingsCard(children: [UpdateRow()]),
-          const SizedBox(height: 16),
+          if (kUpdateGithubRepo.isNotEmpty) ...[
+            const SettingsLabel('版本'),
+            const SettingsCard(children: [UpdateRow()]),
+            const SizedBox(height: 16),
+          ],
           const SettingsLabel('数据与资源'),
           SettingsCard(
             children: [
@@ -151,8 +153,6 @@ class AboutPage extends StatelessWidget {
           const SettingsLabel('法律'),
           SettingsCard(
             children: [
-              // 填了 kGithubRepo 才出现 —— 同一个常量也驱动「检查更新」,
-              // 一处配置点亮两个功能,不会出现"有源码入口但查不了更新"的错位
               if (kGithubRepo.isNotEmpty)
                 SettingsRow(
                   icon: Icons.code,
@@ -160,6 +160,15 @@ class AboutPage extends StatelessWidget {
                   value: kGithubRepo,
                   onTap: () =>
                       _open(context, 'https://github.com/$kGithubRepo'),
+                ),
+              if (kUpstreamGithubRepo.isNotEmpty &&
+                  kUpstreamGithubRepo != kGithubRepo)
+                SettingsRow(
+                  icon: Icons.account_tree_outlined,
+                  title: '上游项目',
+                  value: kUpstreamGithubRepo,
+                  onTap: () =>
+                      _open(context, 'https://github.com/$kUpstreamGithubRepo'),
                 ),
               SettingsRow(
                 icon: Icons.balance_outlined,

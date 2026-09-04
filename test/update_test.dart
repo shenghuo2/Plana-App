@@ -1,12 +1,18 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plana_app/core/app_info.dart';
 import 'package:plana_app/core/store/prefs_store.dart';
 import 'package:plana_app/features/update/update_service.dart';
 
 /// 更新判定的纯逻辑。错了不会崩,只会"永远不提示"或"反复提示已装的版本" ——
 /// 两种都是用户不会报、你也看不见的静默故障,所以钉在这里。
 void main() {
+  test('定制版默认关闭 GitHub 更新源', () async {
+    expect(kUpdateGithubRepo, isEmpty);
+    expect(await fetchLatestRelease('1.0.0'), isNull);
+  });
+
   group('compareSemver', () {
     void newer(String a, String b) {
       expect(compareSemver(a, b), greaterThan(0), reason: '$a 应比 $b 新');

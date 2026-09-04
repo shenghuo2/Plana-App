@@ -16,9 +16,11 @@ import '../../generate/widgets/common.dart'
 import '../../import/import_panel.dart';
 import '../../inpaint/inpaint_overlay.dart';
 import '../../../core/net/anlas_provider.dart';
+import '../../../core/net/external_image_push_client.dart';
 import '../../../core/store/app_stores.dart';
 import '../../../core/util/haptics.dart';
 import '../../../core/util/image_ops.dart';
+import '../external_image_push.dart';
 import '../gallery_state.dart';
 import '../models.dart';
 import '../save_pipeline.dart';
@@ -317,6 +319,9 @@ class _ActionRailState extends ConsumerState<_ActionRail> {
   @override
   Widget build(BuildContext context) {
     final collapsed = ref.watch(railCollapsedProvider);
+    final uploading = ref
+        .watch(externalImagePushUploadsProvider)
+        .contains(result.id);
     return GestureDetector(
       // 竖向拖:上滑展开、下滑收起 —— 方向即语义,不用先找那颗小箭头在哪。
       // 只认速度不认位移:这条轨很窄,一路拖到底反而别扭,轻甩一下就该认。
@@ -332,7 +337,7 @@ class _ActionRailState extends ConsumerState<_ActionRail> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // 收起的只有这四颗;「重新生成」永远露着 —— 它是这一屏的主动作,
+          // 收起的只有这五颗;「重新生成」永远露着 —— 它是这一屏的主动作,
           // 藏起来就等于把最常点的那颗也一起收走了。
           ClipRect(
             child: AnimatedAlign(
@@ -347,6 +352,14 @@ class _ActionRailState extends ConsumerState<_ActionRail> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
+                    _RailButton(
+                      label: uploading ? '上传中' : '上传远端',
+                      icon: Icons.bookmark,
+                      onTap: uploading
+                          ? null
+                          : () => _pushToRemote(context, ref),
+                    ),
+                    const SizedBox(height: 10),
                     _RailButton(
                       label: '重绘',
                       icon: Icons.brush,
@@ -433,6 +446,31 @@ class _ActionRailState extends ConsumerState<_ActionRail> {
   Future<Uint8List?> _bytesOf(WidgetRef ref) async =>
       result.bytes ??
       await ref.read(appStoresProvider).gallery.readImage(result.id);
+
+  /// 原始图库字节直接作为 multipart 文件发送,不经保存管线转码。
+  Future<void> _pushToRemote(BuildContext context, WidgetRef ref) async {
+    final bytes = await _bytesOf(ref);
+    if (!context.mounted) return;
+    if (bytes == null) {
+      hintSnack(context, '图片尚未就绪', icon: Icons.hourglass_empty);
+      return;
+    }
+    try {
+      final receipt = await ref
+          .read(externalImagePushUploadsProvider.notifier)
+          .upload(result: result, imageBytes: bytes);
+      if (!context.mounted) return;
+      hintSnack(
+        context,
+        receipt.deduplicated ? '远端已有此图,已记录来源' : '已上传远端',
+        icon: Icons.bookmark_added_outlined,
+      );
+    } on ExternalImagePushException catch (e) {
+      if (context.mounted) {
+        hintSnack(context, e.message, icon: Icons.error_outline);
+      }
+    }
+  }
 
   /// 参数快照:内存优先;盘上有(hasInput)则懒读,读失败/无快照为 null。
   Future<GenerateState?> _inputOf(WidgetRef ref) async =>
@@ -796,7 +834,7 @@ class _RailButton extends StatelessWidget {
 
   final String label;
   final IconData icon;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
   /// 按住/松手(true = 按下)。给「对比」这种按着才生效的用。

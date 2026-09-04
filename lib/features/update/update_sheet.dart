@@ -37,7 +37,7 @@ class _UpdateRowState extends ConsumerState<UpdateRow> {
       setState(() => _result = check);
       if (check.hasUpdate) {
         await showUpdateSheet(context, check);
-      } else if (kGithubRepo.isEmpty || !installed.isKnown) {
+      } else if (kUpdateGithubRepo.isEmpty || !installed.isKnown) {
         // 没填仓库 / 拿不到本机版本 —— 不是错误,别报红
         hintSnack(context, '暂无更新信息', icon: Icons.info_outline);
       } else {
