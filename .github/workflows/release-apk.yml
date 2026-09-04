@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/cloud-storage-push
+      - release/v1.0.8-patch-s.3
 
 permissions:
   contents: read
@@ -52,12 +53,17 @@ jobs:
           tag="v${version}"
 
           if [[ "$GITHUB_REF_TYPE" != "branch" ]] || \
-             [[ "$GITHUB_REF_NAME" != "main" && "$GITHUB_REF_NAME" != "feature/cloud-storage-push" ]]; then
-            echo "Releases are only allowed from main or feature/cloud-storage-push." >&2
+             [[ "$GITHUB_REF_NAME" != "main" && \
+                "$GITHUB_REF_NAME" != "feature/cloud-storage-push" && \
+                "$GITHUB_REF_NAME" != "release/v1.0.8-patch-s.3" ]]; then
+            echo "This workflow does not allow releases or builds from $GITHUB_REF_NAME." >&2
             exit 1
           fi
           should_release="true"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+          if [[ "$GITHUB_REF_NAME" == "release/v1.0.8-patch-s.3" ]]; then
+            echo "Integration branch: build an artifact without creating a tag or release."
+            should_release="false"
+          elif git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
             echo "Tag $tag already exists; the APK will only be uploaded as a workflow artifact."
             should_release="false"
           fi

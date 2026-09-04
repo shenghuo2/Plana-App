@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/desktop-platforms
+      - release/v1.0.8-patch-s.3
   workflow_dispatch:
 
 permissions:
