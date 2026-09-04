@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:url_launcher/url_launcher.dart';
@@ -88,7 +90,7 @@ class AboutPage extends StatelessWidget {
               ],
             ),
           ),
-          if (kUpdateGithubRepo.isNotEmpty) ...[
+          if (Platform.isAndroid && kUpdateGithubRepo.isNotEmpty) ...[
             const SettingsLabel('版本'),
             const SettingsCard(children: [UpdateRow()]),
             const SizedBox(height: 16),

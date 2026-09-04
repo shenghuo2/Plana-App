@@ -1,8 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/app_info.dart';
 import 'core/auth/auth_mode.dart';
+import 'core/auth/secure_storage.dart';
 import 'core/store/app_stores.dart';
 import 'core/store/gen_settings.dart';
 import 'core/theme/app_theme.dart';
@@ -13,6 +16,19 @@ import 'core/util/haptics.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (Platform.isMacOS &&
+      Platform.environment[kMacOsKeychainSmokeTestEnvironment] == '1') {
+    try {
+      await runMacOsKeychainSmokeTest();
+      stdout.writeln('macOS Keychain smoke test passed.');
+      exit(0);
+    } catch (error, stackTrace) {
+      stderr
+        ..writeln('macOS Keychain smoke test failed: $error')
+        ..writeln(stackTrace);
+      exit(1);
+    }
+  }
   // 启动装载持久化状态(工作台存档 + 图库索引 + 设置;失败按首启空档降级)。
   // 外观预读(首帧不闪色)现在直接取内存态 —— 设置已随 AppStores 一次读全,
   // 不再需要第二笔 I/O,也不必再解一次 Keystore。

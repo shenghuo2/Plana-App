@@ -4,12 +4,14 @@
 
 # Plana App
 
-**NovelAI 第三方 Android 客户端** —— 可能是最舒适的 AI 绘图移动创作端
+**NovelAI 第三方 Flutter 客户端** —— 支持 Android、macOS 与 Windows
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Fork](https://img.shields.io/badge/fork-shenghuo2%2FPlana--App-181717?logo=github)](https://github.com/shenghuo2/Plana-App)
 [![Upstream](https://img.shields.io/badge/upstream-mc5024%2FPlana--App-555?logo=github)](https://github.com/mc5024/Plana-App)
 [![Android](https://img.shields.io/badge/Android-7.0%2B-3ddc84?logo=android&logoColor=white)](#构建)
+[![macOS](https://img.shields.io/badge/macOS-11%2B-000000?logo=apple&logoColor=white)](#桌面端)
+[![Windows](https://img.shields.io/badge/Windows-10%2B-0078d4?logo=windows&logoColor=white)](#桌面端)
 [![Flutter](https://img.shields.io/badge/built%20with-Flutter-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
 
 </div>
@@ -44,6 +46,8 @@
 
 - **云存储推送** 在「我的 → 云存储」配置兼容的 API 地址与 Token 后,可从图库结果页将原图
   直接推送到远端图片管理服务;上传保持原始图片字节,不经过转码
+
+- **桌面端** macOS 与 Windows 使用原生文件选择器、系统安全存储与图片图库,宽窗口自动切换为侧边导航
 
 - **素材库** 灵感库按角色 / 画风 / 场景归类存储并可生成预览图;Vibe 库支持 `.naiv4vibe` 导入导出与逐模型编码管理;
   角色参考图库留存用过的参考图
@@ -82,7 +86,7 @@ NAI 网页端的常规能力 —— 多角色与位置、Vibe Transfer、角色�
 
 | 计划 | 说明 | 阶段 |
 |---|---|---|
-| **多平台适配** | iOS 计划中;其他平台尚未规划 | 计划中 |
+| **多平台适配** | macOS / Windows 已提供实验性构建;iOS 计划中 | 进行中 |
 | **内置 AI 助手** | 应用内对话式协助:撰写与改写提示词、解释参数取值 | 远期 |
 | **内置图像编辑** | 接入图像编辑模型,直接在应用内改图,不必导出到其他工具 | 远期 |
 | **ComfyUI 连接器** | 接入自建 ComfyUI 作为出图后端 | 远期 |
@@ -95,7 +99,8 @@ NAI 网页端的常规能力 —— 多角色与位置、Vibe Transfer、角色�
 
 ## 构建
 
-要求 Dart SDK ^3.12.2(Flutter 3.44 起);Android 7.0(API 24)以上,compileSdk 36(灵动岛进度需要)。
+要求 Dart SDK ^3.12.2(Flutter 3.44 起)。Android 要求 7.0(API 24)以上、compileSdk 36
+(灵动岛进度需要)。
 
 ```bash
 flutter pub get
@@ -103,6 +108,37 @@ flutter build apk --release --target-platform android-arm64
 ```
 
 产物为 `build/app/outputs/apk/release/Plana-<版本>-arm64-v8a.apk`,仅出 arm64-v8a。
+
+### 桌面端
+
+Windows 构建需要 Windows 10/11、Visual Studio 2022 的“使用 C++ 的桌面开发”工作负载
+和 C++ ATL;产物必须连同同目录的 DLL 与 `data/` 一起分发,不能只复制 EXE。
+
+```powershell
+flutter pub get --enforce-lockfile
+flutter build windows --release --no-pub
+```
+
+完整 Windows 目录位于 `build/windows/x64/runner/Release/`,入口是 `Plana.exe`。
+
+macOS 构建需要 macOS 11 以上和 Xcode。Release 构建采用非沙箱模式,凭据写入当前
+用户的 macOS 登录钥匙串,不依赖 Keychain Sharing entitlement 或 Apple 开发者证书。
+
+```bash
+flutter pub get --enforce-lockfile
+flutter build macos --release --no-pub
+hdiutil create -volname "Plana App" \
+  -srcfolder "build/macos/Build/Products/Release/Plana App.app" \
+  -ov -format UDZO Plana-macOS.dmg
+```
+
+`feature/desktop-platforms` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
+上执行检查并生成 ZIP / DMG artifact。当前 macOS artifact 名为
+`Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,并在打包时实际验证
+登录钥匙串的写入、读取和删除。它没有 Apple Developer ID 签名和公证,首次打开仍会
+触发 Gatekeeper,但 Token 与 Bot 会话可以正常安全保存。若需消除系统的未认证开发者
+警告,仍只能使用 Developer ID Application 签名并完成 Apple 公证。Windows 自动产物
+同样未使用代码签名,首次打开可能触发 SmartScreen。
 
 ```bash
 flutter analyze && flutter test

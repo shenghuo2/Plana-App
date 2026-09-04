@@ -29,6 +29,10 @@ class UpdateException implements Exception {
 
 const _channel = MethodChannel('plana/update');
 
+/// 当前 Release 渠道只提供 Android 安装包。桌面端没有对应的签名安装包时不检查，
+/// 避免把 APK release 当成可安装的桌面更新。
+bool get isUpdateCheckSupported => Platform.isAndroid;
+
 /// 已安装包的真实版本(从系统读,不信 Dart 侧手抄的常量)。
 class InstalledInfo {
   const InstalledInfo({required this.versionName, required this.versionCode});
@@ -154,6 +158,9 @@ bool isPrerelease(String v) => _split(v).$2.isNotEmpty;
 
 /// 读已安装版本。通道不可用时返回空 [InstalledInfo],不抛。
 Future<InstalledInfo> installedInfo() async {
+  if (!isUpdateCheckSupported) {
+    return const InstalledInfo(versionName: '', versionCode: 0);
+  }
   try {
     final m = await _channel.invokeMapMethod<String, dynamic>('info');
     if (m == null) return const InstalledInfo(versionName: '', versionCode: 0);

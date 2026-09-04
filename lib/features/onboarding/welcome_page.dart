@@ -1,4 +1,6 @@
 import 'dart:async';
+
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,7 +19,7 @@ import '../profile/widgets/token_status.dart';
 import 'bot_auth_panel.dart';
 import '../../core/util/haptics.dart';
 
-/// 首启欢迎流程:欢迎 → 外观 → 接入 → 通知,共 4 页。
+/// 首启欢迎流程:欢迎 → 外观 → 接入 → 扩展功能 → Android 通知 → 完成。
 /// 内容居中,页间横滑,元素错峰浮现;凭据在本页内就地配完,不再跳出去。
 class WelcomePage extends ConsumerStatefulWidget {
   const WelcomePage({super.key, this.replay = false});
@@ -34,7 +36,9 @@ class WelcomePage extends ConsumerStatefulWidget {
 }
 
 class _WelcomePageState extends ConsumerState<WelcomePage> {
-  static const _pageCount = 6;
+  bool get _supportsNotifications =>
+      defaultTargetPlatform == TargetPlatform.android;
+  int get _pageCount => _supportsNotifications ? 6 : 5;
 
   final _pager = PageController();
   int _index = 0;
@@ -117,7 +121,7 @@ class _WelcomePageState extends ConsumerState<WelcomePage> {
     final botPage = _index == 3 && !hasBot;
     final mustAuth = botPage && mode == AuthMode.bot;
     final skipBot = botPage && !mustAuth;
-    final notifyPage = _index == 4;
+    final notifyPage = _supportsNotifications && _index == 4;
 
     return Scaffold(
       body: SafeArea(
@@ -132,8 +136,12 @@ class _WelcomePageState extends ConsumerState<WelcomePage> {
                   _page(1, (a) => _AppearanceStep(active: a)),
                   _page(2, (a) => _AccessStep(active: a)),
                   _page(3, (a) => _BotStep(active: a)),
-                  _page(4, (a) => _NotifyStep(active: a)),
-                  _page(5, (a) => _DoneStep(active: a)),
+                  if (_supportsNotifications)
+                    _page(4, (a) => _NotifyStep(active: a)),
+                  _page(
+                    _supportsNotifications ? 5 : 4,
+                    (a) => _DoneStep(active: a),
+                  ),
                 ],
               ),
             ),
@@ -405,7 +413,7 @@ class _IntroStep extends StatelessWidget {
       active: active,
       icon: Icons.auto_awesome,
       title: '欢迎使用 Plana',
-      desc: 'NovelAI 移动创作端',
+      desc: 'NovelAI 创作客户端',
       child: Column(
         children: [
           for (final f in const [
