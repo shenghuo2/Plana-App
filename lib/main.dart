@@ -10,9 +10,11 @@ import 'core/store/app_stores.dart';
 import 'core/store/gen_settings.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_settings.dart';
+import 'core/ui/input_focus_guard.dart';
 import 'features/onboarding/welcome_page.dart';
 import 'features/shell/app_shell.dart';
 import 'core/util/haptics.dart';
+import 'features/editor/data/local_tag_db.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,16 +31,22 @@ Future<void> main() async {
       exit(1);
     }
   }
+  // 离线词库索引与存档并行读:它不压缩存、引擎直接 mmap,几毫秒就好。装好后
+  // 注音 / 热度反查从第一帧起就是同步可用的,不再有开机「灌注」这一步。
+  final tagDb = LocalTagDb();
+  final tagDbReady = tagDb.install();
   // 启动装载持久化状态(工作台存档 + 图库索引 + 设置;失败按首启空档降级)。
   // 外观预读(首帧不闪色)现在直接取内存态 —— 设置已随 AppStores 一次读全,
   // 不再需要第二笔 I/O,也不必再解一次 Keystore。
   final stores = await AppStores.open();
+  await tagDbReady;
   final themeInit = loadThemeSettings(stores.prefs);
   runApp(
     ProviderScope(
       overrides: [
         appStoresProvider.overrideWithValue(stores),
         themeInitProvider.overrideWithValue(themeInit),
+        localTagDbProvider.overrideWithValue(tagDb),
       ],
       child: const PlanaApp(),
     ),
@@ -55,6 +63,10 @@ Future<void> main() async {
   stores.postBootMaintenance(); // 选图器缓存清扫 + blob GC(延迟后台跑)
 }
 
+/// 弹层关掉后不把键盘顶出来(见 [InputFocusGuard])。放在外面:换主题时 MaterialApp
+/// 会重建,观察者得是同一个。
+final _inputFocusGuard = InputFocusGuard();
+
 class PlanaApp extends ConsumerWidget {
   const PlanaApp({super.key});
 
@@ -69,6 +81,7 @@ class PlanaApp extends ConsumerWidget {
       theme: AppTheme.light(ts.seed.color),
       darkTheme: AppTheme.dark(ts.seed.color),
       themeMode: ts.mode,
+      navigatorObservers: [_inputFocusGuard],
       home: const _AuthGate(),
     );
   }

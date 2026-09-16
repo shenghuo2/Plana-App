@@ -3,8 +3,9 @@ name: Build desktop
 on:
   push:
     branches:
-      - feature/desktop-platforms
-      - release/v1.0.8-patch-s.3
+      - main
+      - feature/cloud-storage-push
+      - 'release/**'
   workflow_dispatch:
 
 permissions:

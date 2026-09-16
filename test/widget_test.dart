@@ -6,6 +6,7 @@ import 'package:plana_app/core/auth/auth_mode.dart';
 import 'package:plana_app/core/store/app_stores.dart';
 import 'package:plana_app/core/store/gen_settings.dart';
 import 'package:plana_app/features/gallery/gallery_page.dart';
+import 'package:plana_app/features/generate/widgets/bottom_action_bar.dart';
 import 'package:plana_app/main.dart';
 
 /// 测试环境无 Keystore,固定「已选直连」跳过引导页,直接冒烟创作页。
@@ -43,7 +44,6 @@ void main() {
     expect(find.text('生成'), findsWidgets);
     expect(find.text('创作'), findsOneWidget);
 
-    // 放行工作台持久化的 800ms 防抖 Timer,避免拆树时报 pending timer
     await tester.pump(const Duration(milliseconds: 900));
   });
 
@@ -62,7 +62,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 900));
   });
 
-  testWidgets('桌面跨导航断点缩放时保留当前页面且导航仍可用', (WidgetTester tester) async {
+  testWidgets('桌面跨导航断点缩放时保留当前页面且导航仍可用', (
+    WidgetTester tester,
+  ) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -108,7 +110,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
-      3,
+      4,
     );
     expect(find.text('账号与接入'), findsOneWidget);
 
@@ -119,7 +121,7 @@ void main() {
     expect(find.byType(NavigationRail), findsOneWidget);
     expect(
       tester.widget<NavigationRail>(find.byType(NavigationRail)).selectedIndex,
-      3,
+      4,
     );
 
     await tester.tap(
@@ -134,6 +136,59 @@ void main() {
       0,
     );
     expect(find.text('提示词'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 900));
+  });
+
+  Future<Size> pumpPill(WidgetTester tester, int cost) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 300,
+              child: Row(children: [CostPill(cost: cost)]),
+            ),
+          ),
+        ),
+      ),
+    );
+    return tester.getSize(find.byType(CostPill));
+  }
+
+  testWidgets('费用胶囊:免费与两位数点数完全等宽等高', (
+    WidgetTester tester,
+  ) async {
+    final free = await pumpPill(tester, 0);
+    final two = await pumpPill(tester, 35);
+    expect(free.width, equals(two.width));
+    expect(free.height, equals(two.height));
+    expect((await pumpPill(tester, 7)).width, equals(two.width));
+  });
+
+  testWidgets('费用胶囊:三位数撑开,且不会撑满可用宽度', (
+    WidgetTester tester,
+  ) async {
+    final two = await pumpPill(tester, 35);
+    final three = await pumpPill(tester, 350);
+    expect(three.width, greaterThan(two.width));
+    expect(three.width, lessThan(80));
+  });
+
+  testWidgets('生成按钮的费用胶囊只占内容宽,不会撑满整颗按钮', (
+    WidgetTester tester,
+  ) async {
+    await _pumpApp(tester);
+
+    final pill = find.descendant(
+      of: find.byType(BottomActionBar),
+      matching: find.byType(AnimatedSize),
+    );
+    expect(pill, findsOneWidget);
+
+    final size = tester.getSize(pill);
+    expect(size.width, lessThan(80));
+    expect(size.height, equals(20));
 
     await tester.pump(const Duration(milliseconds: 900));
   });

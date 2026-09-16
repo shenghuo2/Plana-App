@@ -11,6 +11,9 @@ import '../../core/net/backend_config.dart';
 import '../../core/store/app_stores.dart';
 import '../../core/store/prefs_store.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/theme/theme_settings.dart';
+import '../assistant/assistant_page.dart';
+import '../assistant/assistant_state.dart';
 import '../gallery/gallery_page.dart';
 import '../generate/generate_page.dart';
 import '../generate/generation_controller.dart';
@@ -21,13 +24,10 @@ import '../update/update_service.dart';
 import '../update/update_sheet.dart' show showUpdateSheet;
 import 'shell_state.dart';
 
-/// 全局骨架:4 tab 底部导航 + PageView 切页。
+/// 全局骨架:5 tab 导航(AI 那格可藏)+ PageView 切页。
 ///
-/// **横滑翻 tab 已关掉**(physics 恒为 NeverScrollable),切页只认底部导航点按与
+/// **横滑翻 tab 已关掉**(physics 恒为 NeverScrollable),切页只认导航点按与
 /// 程序跳转(生成完跳图库、缺 token 跳我的)。PageView 留着只为那段横向推移动画。
-/// 关掉的理由:页内本来就需要横向手势(图库大图翻页、缩放平移),tab 级横滑与它们
-/// 长期抢竞技场 —— 以前靠「碰一下图就锁 shell」的补丁压着,页内一有正经翻页需求
-/// 就压不住了。整个横向手势层交给页面自己,shell 不再参与。
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
 
@@ -43,6 +43,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   static const _pages = [
     GeneratePage(),
     GalleryPage(),
+    AssistantPage(),
     InspirationPage(),
     ProfilePage(),
   ];
@@ -52,21 +53,14 @@ class _AppShellState extends ConsumerState<AppShell> {
   @override
   void initState() {
     super.initState();
-    // 预热鉴权/后端配置(懒加载 AsyncNotifier 的 storage 首读在此触发,
-    // 否则冷启动后立刻点「生成」会在 loading 态被误判成未授权/没 token)。
     ref.read(tokenProvider);
     ref.read(botSessionProvider);
     ref.read(backendBaseProvider);
-    // 账号密码登录的 JWT 临期静默换新(非该来源的令牌自动跳过)。
     ref.read(naiTokenAutoRefreshProvider);
     _scheduleAutoCheck();
   }
 
-  /// 冷启动静默查一次更新(24h 节流)。
-  ///
-  /// 延后 3 秒:启动那几帧要留给首页和鉴权预热,更新弹层不是急事。计时器**必须
-  /// 存下来并在 dispose 取消** —— 裸 `Future.delayed` 在页面提前销毁后照样会醒,
-  /// 属于真实泄漏(widget 冒烟测试会直接报 pending timer)。
+  /// 冷启动静默查一次更新(24h 节流)。定制包没有同签名更新源时完全关闭。
   void _scheduleAutoCheck() {
     if (!isUpdateCheckSupported || kUpdateGithubRepo.isEmpty) return;
     final prefs = ref.read(prefsStoreProvider);
@@ -77,13 +71,12 @@ class _AppShellState extends ConsumerState<AppShell> {
     );
   }
 
-  /// **只在真有新版时弹**,查不到/网络不通一律无声吞掉 —— 用户没主动要求检查,
-  /// 不该为此看到任何失败提示。
+  /// **只在真有新版时弹**,查不到/网络不通一律无声吞掉。
   Future<void> _autoCheckUpdate(PrefsStore prefs) async {
     if (!mounted) return;
     try {
       final installed = await installedInfo();
-      if (!installed.isKnown) return; // 非 Android / 通道缺失
+      if (!installed.isKnown) return;
       final release = await fetchLatestRelease(installed.versionName);
       await markUpdateChecked(prefs);
       if (release == null || !mounted) return;
@@ -92,7 +85,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         UpdateCheck(installed: installed, release: release),
       );
     } catch (_) {
-      // 静默:后台检查失败不打扰
+      // 后台检查失败不打扰用户。
     }
   }
 
@@ -103,18 +96,31 @@ class _AppShellState extends ConsumerState<AppShell> {
     super.dispose();
   }
 
+  void _onEnterCreate() => ref.read(assistantProvider.notifier).markSeen();
+
   @override
   Widget build(BuildContext context) {
     final index = ref.watch(shellIndexProvider);
+    final showAi = ref.watch(
+      themeSettingsProvider.select((t) => t.showAssistant),
+    );
+    final tabs = [
+      kTabCreate,
+      kTabGallery,
+      if (showAi) kTabAssistant,
+      kTabInspiration,
+      kTabProfile,
+    ];
+    if (!showAi && index == kTabAssistant) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(shellIndexProvider.notifier).select(kTabCreate);
+      });
+    }
 
-    // 索引变化(导航点按 / 生成后跳图库)→ 滑到对应页。
     ref.listen<int>(shellIndexProvider, (prev, next) {
       if (!_pc.hasClients) return;
-      final current = _pc.page?.round() ?? _pc.initialPage;
-      if (current != next) {
-        // 切页先收焦点。PageView 是保活的,离开时焦点还留在原页的输入框上
-        // (灵感页搜索框最容易中招),之后**在任何一页**切页都会把软键盘重新
-        // 顶出来一下。放在动画开始前,不是切完再收 —— 否则过渡里照样闪一下。
+      final current = _pc.page ?? _pc.initialPage.toDouble();
+      if (current != next.toDouble()) {
         FocusManager.instance.primaryFocus?.unfocus();
         _pc.animateToPage(
           next,
@@ -124,7 +130,6 @@ class _AppShellState extends ConsumerState<AppShell> {
       }
     });
 
-    // 生成错误全局提示(常驻:切 tab 也不漏)
     ref.listen<GenStatus>(genStatusProvider, (prev, next) {
       final err = next.error;
       if (err == null) return;
@@ -143,13 +148,20 @@ class _AppShellState extends ConsumerState<AppShell> {
       ref.read(generationProvider.notifier).clearError();
     });
 
-    // 生成侧非致命提醒(LoRA 超上限被丢弃等):图照常出,但得说一声,
-    // 否则用户对着一个根本没生效的 LoRA 查半天。
     ref.listen<String?>(genNoticeProvider, (prev, next) {
       if (next == null || next.isEmpty) return;
       hintSnack(context, next, icon: Icons.info_outline);
       ref.read(genNoticeProvider.notifier).clear();
     });
+
+    final selectedTab = tabs.indexOf(index).clamp(0, tabs.length - 1);
+    final createRailIcon = Badge(
+      isLabelVisible: ref.watch(
+        assistantProvider.select((s) => s.changedUnseen),
+      ),
+      smallSize: 8,
+      child: const Icon(Icons.draw_outlined),
+    );
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -158,46 +170,51 @@ class _AppShellState extends ConsumerState<AppShell> {
           bottom: useRail,
           child: PageView(
             controller: _pc,
-            // 只让程序 animateToPage 驱动;用户横滑一律不吃
             physics: const NeverScrollableScrollPhysics(),
-            onPageChanged: (i) =>
-                ref.read(shellIndexProvider.notifier).select(i),
+            // 页面只跟随索引,不能在动画经过中写回中间 tab。
             children: _pages,
           ),
         );
 
         return Scaffold(
-          // PageView 必须在断点两侧留在同一 element 位置。把它分别放进
-          // rail / bottom-nav 两棵 Scaffold 子树会在窗口跨过 900px 时重建:
-          // provider 还停在图库,新 PageView 却从 initialPage=0 起步,于是导航
-          // 高亮图库、画面卡在创作,再次点图库也不会产生状态变化。
+          // 页面始终保留在同一 element 位置。窗口跨过断点时不能重建 PageView,
+          // 否则导航会保留旧索引而页面回到创作页。
           body: Row(
             children: [
               if (useRail)
                 SafeArea(
                   child: NavigationRail(
-                    selectedIndex: index,
+                    selectedIndex: selectedTab,
                     labelType: NavigationRailLabelType.all,
                     groupAlignment: -0.82,
-                    onDestinationSelected: (i) =>
-                        ref.read(shellIndexProvider.notifier).select(i),
-                    destinations: const [
+                    onDestinationSelected: (i) {
+                      final tab = tabs[i];
+                      ref.read(shellIndexProvider.notifier).select(tab);
+                      if (tab == kTabCreate) _onEnterCreate();
+                    },
+                    destinations: [
                       NavigationRailDestination(
-                        icon: Icon(Icons.draw_outlined),
-                        selectedIcon: Icon(Icons.draw),
-                        label: Text('创作'),
+                        icon: createRailIcon,
+                        selectedIcon: const Icon(Icons.draw),
+                        label: const Text('创作'),
                       ),
-                      NavigationRailDestination(
+                      const NavigationRailDestination(
                         icon: Icon(Icons.photo_library_outlined),
                         selectedIcon: Icon(Icons.photo_library),
                         label: Text('图库'),
                       ),
-                      NavigationRailDestination(
+                      if (showAi)
+                        const NavigationRailDestination(
+                          icon: Icon(Icons.auto_awesome_outlined),
+                          selectedIcon: Icon(Icons.auto_awesome),
+                          label: Text('AI'),
+                        ),
+                      const NavigationRailDestination(
                         icon: Icon(Icons.lightbulb_outline),
                         selectedIcon: Icon(Icons.lightbulb),
                         label: Text('灵感'),
                       ),
-                      NavigationRailDestination(
+                      const NavigationRailDestination(
                         icon: Icon(Icons.person_outline),
                         selectedIcon: Icon(Icons.person),
                         label: Text('我的'),
@@ -212,28 +229,41 @@ class _AppShellState extends ConsumerState<AppShell> {
           bottomNavigationBar: useRail
               ? null
               : NavigationBar(
-                  selectedIndex: index,
-                  // 重绘编辑中也允许点按切页(图库页 keep-alive,回来面板还在);
-                  // 仅横滑仍锁(防抢涂抹手势)。
-                  onDestinationSelected: (i) =>
-                      ref.read(shellIndexProvider.notifier).select(i),
-                  destinations: const [
+                  selectedIndex: selectedTab,
+                  onDestinationSelected: (i) {
+                    final tab = tabs[i];
+                    ref.read(shellIndexProvider.notifier).select(tab);
+                    if (tab == kTabCreate) _onEnterCreate();
+                  },
+                  destinations: [
                     NavigationDestination(
-                      icon: Icon(Icons.draw_outlined),
-                      selectedIcon: Icon(Icons.draw),
+                      icon: Badge(
+                        isLabelVisible: ref.watch(
+                          assistantProvider.select((s) => s.changedUnseen),
+                        ),
+                        smallSize: 8,
+                        child: const Icon(Icons.draw_outlined),
+                      ),
+                      selectedIcon: const Icon(Icons.draw),
                       label: '创作',
                     ),
-                    NavigationDestination(
+                    const NavigationDestination(
                       icon: Icon(Icons.photo_library_outlined),
                       selectedIcon: Icon(Icons.photo_library),
                       label: '图库',
                     ),
-                    NavigationDestination(
+                    if (showAi)
+                      const NavigationDestination(
+                        icon: Icon(Icons.auto_awesome_outlined),
+                        selectedIcon: Icon(Icons.auto_awesome),
+                        label: 'AI',
+                      ),
+                    const NavigationDestination(
                       icon: Icon(Icons.lightbulb_outline),
                       selectedIcon: Icon(Icons.lightbulb),
                       label: '灵感',
                     ),
-                    NavigationDestination(
+                    const NavigationDestination(
                       icon: Icon(Icons.person_outline),
                       selectedIcon: Icon(Icons.person),
                       label: '我的',

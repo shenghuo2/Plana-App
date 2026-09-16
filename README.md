@@ -50,6 +50,8 @@
 
 - **桌面端** macOS 与 Windows 使用原生文件选择器、系统安全存储与图片图库,宽窗口自动切换为侧边导航
 
+- **AI 助手** 支持在应用内撰写和改写提示词、解释参数,可在外观设置中隐藏导航入口
+
 - **素材库** 灵感库按角色 / 画风 / 场景归类存储并可生成预览图;Vibe 库支持 `.naiv4vibe` 导入导出与逐模型编码管理;
   角色参考图库留存用过的参考图
 
@@ -88,7 +90,6 @@ NAI 网页端的常规能力 —— 多角色与位置、Vibe Transfer、角色�
 | 计划 | 说明 | 阶段 |
 |---|---|---|
 | **多平台适配** | macOS / Windows 已提供实验性构建;iOS 计划中 | 进行中 |
-| **内置 AI 助手** | 应用内对话式协助:撰写与改写提示词、解释参数取值 | 远期 |
 | **内置图像编辑** | 接入图像编辑模型,直接在应用内改图,不必导出到其他工具 | 远期 |
 | **ComfyUI 连接器** | 接入自建 ComfyUI 作为出图后端 | 远期 |
 
@@ -145,8 +146,8 @@ hdiutil create -volname "Plana App" \
 flutter analyze && flutter test
 ```
 
-约 8 万行 Dart、60 个测试文件 / 669 个用例。分词器、Anlas 公式、Vibe 哈希口径、
-NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即失败。
+分词器、Anlas 公式、Vibe 哈希口径、NAI 5 载荷契约、Argon2id 派生与新功能均有自动化测试,
+改动对不上即失败。
 
 ### GitHub Actions 发布
 
@@ -165,8 +166,8 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 仍会构建并保留 Actions artifact,但不重复创建 Release。固定签名证书不匹配时也会
 立即终止,不会发布误签名 APK。
 
-`release/v1.0.8-patch-s.3` 是同时集成上游主线、云存储推送和桌面端适配的测试分支。
-推送该分支会生成签名 APK 与桌面端 Actions artifact,但不自动创建 tag 或 Release。
+`release/**` 分支用于整合上游主线、云存储推送和桌面端适配。推送此类分支会生成签名 APK
+与 macOS / Windows Actions artifact,但不自动创建 tag 或 Release,以便校验三端产物后统一发布。
 
 ## 致谢与出处
 
@@ -182,9 +183,10 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 | [DanbooruSearchOnline](https://github.com/SuzumiyaAkizuki/DanbooruSearchOnline) · SuzumiyaAkizuki | 增强补全的在线中文搜词、译名与一句话简介 |
 | [quicktagcloud](https://novelai.quicktagcloud.com/) | 法典图鉴的全部数据(词条 / 画师串 / 合集 / 例图)。只读接入,数据不随包分发,本应用不修改也不发布法典内容,所有内容归原作者所有 |
 | [@huggingface/tokenizers](https://github.com/huggingface/tokenizers) | T5 分词器移植的参照实现 |
+| [anime_censor_detection](https://huggingface.co/deepghs/anime_censor_detection) · deepghs | 自动打码的检测模型(`assets/models/censor_n.ort`,随包分发),即其 `censor_detect_v1.0_n`,本项目只做了格式转换与量化(MIT) |
 | [NovelAI](https://novelai.net/) · Anlatan | 图像生成服务本身 |
 
-第三方内容的版权归其各自作者所有;其中随包分发的部分(标签库、T5 词表)见
+第三方内容的版权归其各自作者所有;其中随包分发的部分(标签库、T5 词表、打码模型)见
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),其余仅作运行时索引与调用。
 
 ### 开源库
