@@ -10,7 +10,7 @@
 [![Fork](https://img.shields.io/badge/fork-shenghuo2%2FPlana--App-181717?logo=github)](https://github.com/shenghuo2/Plana-App)
 [![Upstream](https://img.shields.io/badge/upstream-mc5024%2FPlana--App-555?logo=github)](https://github.com/mc5024/Plana-App)
 [![Android](https://img.shields.io/badge/Android-7.0%2B-3ddc84?logo=android&logoColor=white)](#构建)
-[![macOS](https://img.shields.io/badge/macOS-11%2B-000000?logo=apple&logoColor=white)](#桌面端)
+[![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](#桌面端)
 [![Windows](https://img.shields.io/badge/Windows-10%2B-0078d4?logo=windows&logoColor=white)](#桌面端)
 [![Flutter](https://img.shields.io/badge/built%20with-Flutter-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
 
@@ -123,7 +123,7 @@ flutter build windows --release --no-pub
 
 完整 Windows 目录位于 `build/windows/x64/runner/Release/`,入口是 `Plana.exe`。
 
-macOS 构建需要 macOS 11 以上和 Xcode。Release 构建采用非沙箱模式,凭据写入当前
+macOS 构建需要 macOS 14 以上和 Xcode。Release 构建采用非沙箱模式,凭据写入当前
 用户的 macOS 登录钥匙串,不依赖 Keychain Sharing entitlement 或 Apple 开发者证书。
 
 ```bash

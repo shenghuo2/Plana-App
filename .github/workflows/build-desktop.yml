@@ -133,7 +133,7 @@ jobs:
 
           test -x "$executable_path"
           test "$executable_name" = "Plana App"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist_path")" = "11.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist_path")" = "14.0"
           codesign --verify --deep --strict --verbose=4 "$app_path"
           codesign --display --entitlements "$entitlements_path" "$app_path" || true
           if [[ -s "$entitlements_path" ]]; then
