@@ -121,7 +121,11 @@ jobs:
           # Use the runner-provided sdkmanager directly and make it available
           # to the package-install step below.
           echo "$sdkmanager_dir" >> "$GITHUB_PATH"
+          # sdkmanager closes stdin after accepting the last license. `yes`
+          # then receives SIGPIPE, which is harmless but trips global pipefail.
+          set +o pipefail
           yes | "$sdkmanager" --licenses >/dev/null
+          set -o pipefail
 
       - name: Install Android SDK packages
         shell: bash
