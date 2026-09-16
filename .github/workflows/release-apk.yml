@@ -107,7 +107,21 @@ jobs:
           cache: true
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK is unavailable}}"
+          sdkmanager_dir="$sdk_root/cmdline-tools/latest/bin"
+          sdkmanager="$sdkmanager_dir/sdkmanager"
+          test -x "$sdkmanager"
+
+          # GitHub's current command-line tools no longer provide the legacy
+          # `tools` package requested by android-actions/setup-android@v3.
+          # Use the runner-provided sdkmanager directly and make it available
+          # to the package-install step below.
+          echo "$sdkmanager_dir" >> "$GITHUB_PATH"
+          yes | "$sdkmanager" --licenses >/dev/null
 
       - name: Install Android SDK packages
         shell: bash
