@@ -24,8 +24,8 @@
 
 本仓库是 [mc5024/Plana-App](https://github.com/mc5024/Plana-App) 的定制分支。
 当前版本增加了向自建图片管理服务推送图库原图的能力,并提供 macOS 与 Windows
-实验性构建。定制 APK 使用独立签名,并已关闭上游 Release 更新检查,
-避免提示无法直接覆盖安装的官方版本。
+实验性构建。Android 定制包只检查本 fork 的同签名 Release,不会提示或下载
+无法直接覆盖安装的上游官方版本。
 
 ## 亮点
 
@@ -47,6 +47,9 @@
 
 - **云存储推送** 在「我的 → 云存储」配置兼容的 API 地址与 Token 后,可从图库结果页将原图
   直接推送到远端图片管理服务;上传保持原始图片字节,不经过转码
+
+- **应用内更新** Android 冷启动会按 24 小时间隔静默检查本 fork 的 Release,也可在
+  「我的 → 关于 → 检查更新」手动触发;APK 在应用内下载并校验后由系统安装器完成覆盖安装
 
 - **桌面端** macOS 与 Windows 使用原生文件选择器、系统安全存储与图片图库,宽窗口自动切换为侧边导航
 
@@ -166,8 +169,11 @@ flutter analyze && flutter test
 仍会构建并保留 Actions artifact,但不重复创建 Release。固定签名证书不匹配时也会
 立即终止,不会发布误签名 APK。
 
-`release/**` 分支用于整合上游主线、云存储推送和桌面端适配。推送此类分支会生成签名 APK
-与 macOS / Windows Actions artifact,但不自动创建 tag 或 Release,以便校验三端产物后统一发布。
+`release/**` 分支用于整合上游主线、云存储推送、应用内更新和桌面端适配。每个 release
+分支都必须包含 `feature/cloud-storage-push` 与 `feature/in-app-updater`;Android 工作流会在
+构建前校验两项特性的提交历史、fork 更新源和关键实现文件,缺少任一项都会终止。推送此类
+分支会生成签名 APK 与 macOS / Windows Actions artifact,但不自动创建 tag 或 Release,
+以便校验三端产物后统一发布。
 
 ## 致谢与出处
 
