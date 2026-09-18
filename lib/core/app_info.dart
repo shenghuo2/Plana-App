@@ -8,8 +8,8 @@ library;
 /// `android:label` 一起改 —— 那个是桌面图标下的名字,读不到 Dart 常量。
 const kAppName = 'Plana App';
 const kAppTagline = 'NovelAI 创作客户端';
-const kAppVersion = '1.1.0-patch-s.4';
-const kAppBuild = '19';
+const kAppVersion = '1.1.0-patch-s.5';
+const kAppBuild = '20';
 
 /// 预发布版(版号带 `-`):关于页加内测标,免得测试反馈回来分不清版本。
 bool get kIsPrerelease => kAppVersion.contains('-');
@@ -43,14 +43,12 @@ const kQqGroupId = '1078261982';
 /// 当前定制版的 GitHub 仓库(`owner/repo`),关于页据此显示源码入口。
 const kGithubRepo = 'shenghuo2/Plana-App';
 
-/// 原项目仓库。定制版继续保留上游出处,但不从这里检查更新。
+/// 原项目仓库。定制版保留上游出处,但绝不从这里安装更新。
 const kUpstreamGithubRepo = 'mc5024/Plana-App';
 
-/// 用于检查 Release 的 GitHub 仓库(`owner/repo`)。
-///
-/// 定制包使用独立签名,不能直接覆盖上游 APK,因此保持为空以完全关闭更新检查。
-/// 若未来发布同签名的 fork Release,只在这里填入该 fork 仓库。
-const kUpdateGithubRepo = '';
+/// 同签名定制包的更新仓库。更新器只能从这里取 APK,不能改回上游仓库:
+/// 两边签名不同,下载上游包后 Android 会拒绝覆盖安装。
+const kUpdateGithubRepo = 'shenghuo2/Plana-App';
 
 /// 本项目的许可证。GPL-3.0:分发修改版(含打包成 APK 分发)必须同样开源。
 const kLicense = 'GPL-3.0';

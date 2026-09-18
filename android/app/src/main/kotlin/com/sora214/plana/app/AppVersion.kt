@@ -10,9 +10,8 @@ import android.os.Build
  * 抄错顶多难看;一旦拿它判断"要不要更新",抄错就是全员误判 —— 要么反复提示
  * 已装的版本,要么永远不提示。系统里的版本号是安装器写进去的,不可能对不上。
  *
- * 本应用**不自己装包**:检查到新版只把用户送去 GitHub Release 页,下载与安装
- * 交给浏览器和系统。因此这里既不需要 `REQUEST_INSTALL_PACKAGES`,也不需要
- * FileProvider。
+ * 下载完成后仍由 Android 系统安装器执行覆盖安装;本对象仅提供安装前所需的
+ * 当前版本信息,APK 校验与 FileProvider 入口在 [AppUpdater]。
  */
 object AppVersion {
 

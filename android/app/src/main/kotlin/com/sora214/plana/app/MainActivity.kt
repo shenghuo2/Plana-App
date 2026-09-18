@@ -7,9 +7,11 @@ import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     private val documentSaver = DocumentSaver(this)
+    private val updateExecutor = Executors.newSingleThreadExecutor()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -77,8 +79,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // 检查更新:版本号从系统读(不信 Dart 侧手抄的常量)。
-        // 下载与安装不归本应用管 —— 只把用户送去 GitHub Release 页。
+        // 更新:版本号从系统读;APK 解析放工作线程,避免签名校验卡住 Flutter UI。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, UPDATE_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -88,6 +89,43 @@ class MainActivity : FlutterActivity() {
                             "versionName" to AppVersion.name(this),
                         ),
                     )
+
+                    "install" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.error("invalid_update", "缺少安装包路径", null)
+                        } else {
+                            updateExecutor.execute {
+                                try {
+                                    val apk = AppUpdater.validate(this, path)
+                                    runOnUiThread {
+                                        try {
+                                            val launched = AppUpdater.launch(this, apk)
+                                            result.success(
+                                                if (launched) "launched" else "permission_required",
+                                            )
+                                        } catch (e: Exception) {
+                                            result.error(
+                                                "update_install_failed",
+                                                e.message ?: "无法打开系统安装窗口",
+                                                null,
+                                            )
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    runOnUiThread {
+                                        result.error(
+                                            "invalid_update",
+                                            e.message ?: "安装包校验失败",
+                                            null,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    "canInstallPackages" -> result.success(AppUpdater.canInstallPackages(this))
 
                     else -> result.notImplemented()
                 }
@@ -122,6 +160,11 @@ class MainActivity : FlutterActivity() {
         // 先交给插件(file_picker 等)照常分发,再看是不是 DocumentSaver 那一单
         super.onActivityResult(requestCode, resultCode, data)
         documentSaver.onActivityResult(requestCode, resultCode, data)
+    }
+
+    override fun onDestroy() {
+        updateExecutor.shutdownNow()
+        super.onDestroy()
     }
 
     companion object {
