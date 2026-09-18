@@ -36,6 +36,30 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify required release features
+        if: startsWith(github.ref_name, 'release/')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          declare -A required_features=(
+            [cloud-storage-push]=3a52252d116ebb7fd28cbe3bfc78e94b2a7bc7e9
+            [in-app-updater]=73c6eca5987a713bf4f37e3571f1d31a5b8f515e
+          )
+          for feature in "${!required_features[@]}"; do
+            commit="${required_features[$feature]}"
+            if ! git merge-base --is-ancestor "$commit" HEAD; then
+              echo "Release branch is missing required feature: $feature ($commit)" >&2
+              exit 1
+            fi
+          done
+
+          grep -Fq "const kUpdateGithubRepo = 'shenghuo2/Plana-App';" lib/core/app_info.dart
+          test -f lib/features/update/update_download.dart
+          test -f android/app/src/main/kotlin/com/sora214/plana/app/AppUpdater.kt
+          test -f lib/features/gallery/external_image_push.dart
+          test -f lib/features/profile/cloud_storage_page.dart
+
       - name: Validate version and ref
         id: version
         shell: bash
