@@ -52,6 +52,8 @@ class AssistantState {
     this.running = false,
     this.liveTools = const [],
     this.stage = '',
+    this.liveText = '',
+    this.liveReasoning = '',
     this.changedUnseen = false,
     this.jobs = const {},
     this.mode = AssistantMode.normal,
@@ -78,6 +80,13 @@ class AssistantState {
   /// 等待期的阶段文案。一轮要 20~40 秒,光转圈会让人以为死了。
   final String stage;
 
+  /// 正在写的这一跳的正文(自填接口那条才有,见 [AgentDelta])。每帧整块替换,
+  /// 不是往后拼;换一跳会从头再来。跑完并进 [AssistantMsg.text],这里清空。
+  final String liveText;
+
+  /// 同上,模型这一跳的思考过程。跑完**不留**:最终消息里本来就不带它。
+  final String liveReasoning;
+
   /// 正在为某条消息出的图:消息 id → 出图任务 id。**只在「图片显示在对话里」
   /// 开着时才记** —— 关了的话页面已经切去图库看进度了,对话里再画一条是重复。
   ///
@@ -96,6 +105,8 @@ class AssistantState {
     bool? running,
     List<ToolTrace>? liveTools,
     String? stage,
+    String? liveText,
+    String? liveReasoning,
     bool? changedUnseen,
     Map<String, String>? jobs,
     AssistantMode? mode,
@@ -105,6 +116,8 @@ class AssistantState {
     running: running ?? this.running,
     liveTools: liveTools ?? this.liveTools,
     stage: stage ?? this.stage,
+    liveText: liveText ?? this.liveText,
+    liveReasoning: liveReasoning ?? this.liveReasoning,
     changedUnseen: changedUnseen ?? this.changedUnseen,
     jobs: jobs ?? this.jobs,
     mode: mode ?? this.mode,
@@ -471,9 +484,11 @@ class AssistantNotifier extends Notifier<AssistantState> {
         ],
         running: true,
         liveTools: const [],
+        liveText: '',
+        liveReasoning: '',
         // 一开始是模型在想,不是在查资料:大多数轮次根本不调工具,开场就报「查资料」
         // 是在说一件还没发生、多半也不会发生的事。真调了工具再切过去(见下面的事件)。
-        stage: '正在想…',
+        stage: '思考中',
       ),
     );
     // 记录跟着这条提问一起开:下面还要等灵感库、规则这些,这期间按了停止也得收尾。
@@ -572,6 +587,7 @@ class AssistantNotifier extends Notifier<AssistantState> {
             libraryScope: libraryScopeWire(scope),
             chosenModes: modeKeys,
             think: assistantSettingsOf(ref).thinkLevel,
+            stream: assistantSettingsOf(ref).stream,
             trace: trace,
           )
         : streamAgentPrompt(
@@ -620,7 +636,7 @@ class AssistantNotifier extends Notifier<AssistantState> {
             // 就再也拿不到「查的是普拉娜」这件事了。
             tools.add(ToolTrace(name: name, subject: toolSubject(args)));
             _set(
-              state.copyWith(liveTools: List.of(tools), stage: '正在查资料…'),
+              state.copyWith(liveTools: List.of(tools), stage: '查资料中'),
               persist: false,
             );
           case AgentToolResult(:final name, :final summary):
@@ -633,7 +649,14 @@ class AssistantNotifier extends Notifier<AssistantState> {
             _set(
               // 结果回来之后模型接着想:可能再查一轮,可能出图,也可能只是回答个问题
               // (「芙兰是谁」查完就答,没有提示词可写)—— 所以不报「写提示词」
-              state.copyWith(liveTools: List.of(tools), stage: '正在想…'),
+              state.copyWith(liveTools: List.of(tools), stage: '思考中'),
+              persist: false,
+            );
+          case AgentDelta(:final text, :final reasoning):
+            // 整块替换,不往后拼(见 AgentDelta 的说明)。这一段不落盘 ——
+            // 半截话没有存的价值,真存了下次启动还得当完整回复显示。
+            _set(
+              state.copyWith(liveText: text, liveReasoning: reasoning),
               persist: false,
             );
           case AgentDegraded():
@@ -746,6 +769,8 @@ class AssistantNotifier extends Notifier<AssistantState> {
         running: false,
         liveTools: const [],
         stage: '',
+        liveText: '',
+        liveReasoning: '',
       ),
     );
   }
@@ -809,6 +834,8 @@ class AssistantNotifier extends Notifier<AssistantState> {
         running: false,
         liveTools: const [],
         stage: '',
+        liveText: '',
+        liveReasoning: '',
       ),
     );
     // 纯文本那种只给复制:不自动导入、不自动出图
@@ -882,7 +909,13 @@ class AssistantNotifier extends Notifier<AssistantState> {
     _sub?.cancel();
     _sub = null;
     _set(
-      state.copyWith(running: false, liveTools: const [], stage: ''),
+      state.copyWith(
+        running: false,
+        liveTools: const [],
+        stage: '',
+        liveText: '',
+        liveReasoning: '',
+      ),
       persist: false,
     );
   }

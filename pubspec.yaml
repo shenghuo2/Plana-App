@@ -24,7 +24,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # 改这里必须同步改 lib/core/app_info.dart 的 kAppVersion / kAppBuild
 # (test/app_info_test.dart 会钉住,对不上直接红)。
 # 定制版使用独立签名和版本后缀;GitHub Release tag 必须与 versionName 对齐。
-version: 1.1.0-patch-s.5+20
+version: 1.1.1-patch-s.1+21
 
 environment:
   sdk: ^3.12.2
