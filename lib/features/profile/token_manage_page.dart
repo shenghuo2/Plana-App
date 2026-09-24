@@ -684,7 +684,7 @@ class NaiKeyStatusLine extends ConsumerWidget {
               ),
               Text(
                 '待核对 ${fmtInt(q.pendingAnlas)} 点 / '
-                '${fmtInt(q.opusPendingImages)} 张 · 排队 ${q.queueLength}',
+                '${fmtInt(q.opusPendingImages)} 张 · 排队 ${q.queueLength ?? '未知'}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: small.copyWith(color: scheme.outline),

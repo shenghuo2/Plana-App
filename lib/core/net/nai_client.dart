@@ -83,7 +83,7 @@ typedef NaiProxyQuota = ({
   int pendingAnlas,
   int opusRemainingImages,
   int opusPendingImages,
-  int queueLength,
+  int? queueLength,
 });
 
 /// 档位显示名。
@@ -554,7 +554,7 @@ class NaiClient {
         pendingAnlas: field('pending_anlas'),
         opusRemainingImages: field('opus_remaining_images'),
         opusPendingImages: field('opus_pending_images'),
-        queueLength: field('queue_length'),
+        queueLength: (data['queue_length'] as num?)?.toInt(),
       );
     } catch (_) {
       throw NaiException('代理额度响应格式不正确');

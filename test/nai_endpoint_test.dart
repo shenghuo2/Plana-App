@@ -129,6 +129,15 @@ void main() {
         req.response.statusCode = 402;
       } else if (auth == 'Bearer malformed') {
         req.response.write('{}');
+      } else if (auth == 'Bearer no-queue') {
+        req.response.write(
+          jsonEncode({
+            'remaining_anlas': 42,
+            'pending_anlas': 3,
+            'opus_remaining_images': 8,
+            'opus_pending_images': 1,
+          }),
+        );
       } else if (auth == 'Bearer client-key') {
         req.response.write(
           jsonEncode({
@@ -154,6 +163,9 @@ void main() {
       expect(quota.opusRemainingImages, 8);
       expect(quota.opusPendingImages, 1);
       expect(quota.queueLength, 2);
+      final noQueue = await client.proxyQuota('no-queue');
+      expect(noQueue.remainingAnlas, 42);
+      expect(noQueue.queueLength, isNull);
       await expectLater(
         client.proxyQuota('bad'),
         throwsA(
@@ -175,7 +187,7 @@ void main() {
         throwsA(isA<NaiException>()),
       );
     });
-    expect(paths, ['/quota', '/quota', '/quota', '/quota']);
+    expect(paths, ['/quota', '/quota', '/quota', '/quota', '/quota']);
   });
 
   test('令牌自带的地址:生成与查点数都提交到那台机器', () async {
