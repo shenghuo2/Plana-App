@@ -114,8 +114,8 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 
 ### GitHub Actions 发布
 
-`.github/workflows/release-apk.yml` 会运行静态分析与完整测试,使用固定发布密钥构建
-`arm64-v8a` APK,校验 zipalign、v2/v3 签名与证书指纹,最后创建 GitHub Release。
+此 feature 分支的 `.github/workflows/release-apk.yml` 仅允许手动构建 APK artifact:
+它会运行分析、测试及签名校验,但不会创建 tag 或 GitHub Release。
 
 仓库需要配置以下 GitHub Actions Secrets,密钥文件与密码不得提交到 Git:
 
@@ -124,10 +124,8 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 - `ANDROID_KEY_ALIAS`: 发布密钥别名
 - `ANDROID_KEY_PASSWORD`: 发布私钥密码
 
-推送到 `main` 或 `feature/cloud-storage-push` 时会自动构建并发布,`dev` 分支不会触发。
-工作流以 `pubspec.yaml` 中的版本创建 tag(例如 `v1.0.7-patch-s.2`);已有同名 tag 时
-仍会构建并保留 Actions artifact,但不重复创建 Release。固定签名证书不匹配时也会
-立即终止,不会发布误签名 APK。
+push 到 `feature/cloud-storage-push` 不触发发布构建;功能须先整合到 `release/*`
+分支,验收三端产物后手动发布。只有已发布的正式稳定版才合并进 `main`。
 
 ## 致谢与出处
 

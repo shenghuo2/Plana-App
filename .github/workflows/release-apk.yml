@@ -1,10 +1,7 @@
-name: Release Android APK
+name: Rebuild cloud-storage feature APK
 
 on:
-  push:
-    branches:
-      - main
-      - feature/cloud-storage-push
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,9 +22,6 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_number: ${{ steps.version.outputs.build_number }}
-      tag: ${{ steps.version.outputs.tag }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
-      should_release: ${{ steps.version.outputs.should_release }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -49,28 +43,14 @@ jobs:
 
           version="${BASH_REMATCH[1]}"
           build_number="${BASH_REMATCH[3]}"
-          tag="v${version}"
-
           if [[ "$GITHUB_REF_TYPE" != "branch" ]] || \
-             [[ "$GITHUB_REF_NAME" != "main" && "$GITHUB_REF_NAME" != "feature/cloud-storage-push" ]]; then
-            echo "Releases are only allowed from main or feature/cloud-storage-push." >&2
+             [[ "$GITHUB_REF_NAME" != "feature/cloud-storage-push" ]]; then
+            echo "Feature APK rebuilds are only allowed from feature/cloud-storage-push." >&2
             exit 1
-          fi
-          should_release="true"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag $tag already exists; the APK will only be uploaded as a workflow artifact."
-            should_release="false"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
-          if [[ "$version" == *-* ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
 
   build:
     name: Verify and build signed APK
@@ -204,49 +184,3 @@ jobs:
         if: always()
         shell: bash
         run: rm -f android/key.properties android/plana-release.jks
-
-  release:
-    name: Create GitHub release
-    needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Download APK
-        uses: actions/download-artifact@v8
-        with:
-          name: plana-android-${{ needs.prepare.outputs.version }}
-          path: /tmp/release
-
-      - name: Create release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: Plana App ${{ needs.prepare.outputs.version }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-          prerelease: ${{ needs.prepare.outputs.prerelease }}
-          fail_on_unmatched_files: true
-          body: |
-            ## Android
-
-            > **签名提醒:** 本仓库 APK 使用与上游 `mc5024/Plana-App` 不同的签名。
-            > 在标准 Android 安装机制下,两者无法相互覆盖安装或升级。切换前请先备份数据;
-            > 卸载应用会删除其本地应用数据。
-
-            - ABI: `arm64-v8a`
-            - Minimum Android version: Android 7.0 (API 24)
-            - Version code: `${{ needs.prepare.outputs.build_number }}`
-            - Signing certificate SHA-256: `${{ env.EXPECTED_SIGNER_SHA256 }}`
-
-            `SHA256SUMS.txt` contains the APK file checksum.
-          files: |
-            /tmp/release/*.apk
-            /tmp/release/SHA256SUMS.txt
