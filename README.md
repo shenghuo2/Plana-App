@@ -137,7 +137,7 @@ hdiutil create -volname "Plana App" \
   -ov -format UDZO Plana-macOS.dmg
 ```
 
-`feature/desktop-platforms` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
+`release/*` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
 上执行检查并生成 ZIP / DMG artifact。当前 macOS artifact 名为
 `Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,并在打包时实际验证
 登录钥匙串的写入、读取和删除。它没有 Apple Developer ID 签名和公证,首次打开仍会
@@ -155,7 +155,7 @@ flutter analyze && flutter test
 ### GitHub Actions 发布
 
 `.github/workflows/release-apk.yml` 会运行静态分析与完整测试,使用固定发布密钥构建
-`arm64-v8a` APK,校验 zipalign、v2/v3 签名与证书指纹,最后创建 GitHub Release。
+`arm64-v8a` APK,校验 zipalign、v2/v3 签名与证书指纹,并上传待验收的 Actions artifact。
 
 仓库需要配置以下 GitHub Actions Secrets,密钥文件与密码不得提交到 Git:
 
@@ -164,16 +164,17 @@ flutter analyze && flutter test
 - `ANDROID_KEY_ALIAS`: 发布密钥别名
 - `ANDROID_KEY_PASSWORD`: 发布私钥密码
 
-推送到 `main` 或 `feature/cloud-storage-push` 时会自动构建并发布,`dev` 分支不会触发。
-工作流以 `pubspec.yaml` 中的版本创建 tag(例如 `v1.0.7-patch-s.2`);已有同名 tag 时
-仍会构建并保留 Actions artifact,但不重复创建 Release。固定签名证书不匹配时也会
-立即终止,不会发布误签名 APK。
+`dev` 仅快进跟随上游主线;`feature/*` 用于独立开发。两类分支的 push 都不触发发布构建。
+`main` 只保存已经发布的正式稳定版,其 push 也不自动创建 tag 或 Release。
+固定签名证书不匹配时构建立即终止,不会产出待发布 APK。
 
 `release/**` 分支用于整合上游主线、云存储推送、应用内更新和桌面端适配。每个 release
 分支都必须包含 `feature/cloud-storage-push` 与 `feature/in-app-updater`;Android 工作流会在
 构建前校验两项特性的提交历史、fork 更新源和关键实现文件,缺少任一项都会终止。推送此类
-分支会生成签名 APK 与 macOS / Windows Actions artifact,但不自动创建 tag 或 Release,
-以便校验三端产物后统一发布。
+分支会生成签名 APK 与 macOS / Windows Actions artifact,但不自动创建 tag 或 Release。
+确认三端产物、版本号、签名和更新流程后,从已验证提交手动创建 tag 并发布 GitHub
+Release。只有非草稿、非 prerelease 的正式版才通过普通 merge 进入 `main`;测试版留在
+release 分支,历史分支和 tag 保留。具体约束见 [AGENTS.md](AGENTS.md)。
 
 ## 致谢与出处
 

@@ -3,10 +3,7 @@ name: Build desktop
 on:
   push:
     branches:
-      - main
-      - feature/cloud-storage-push
       - 'release/**'
-  workflow_dispatch:
 
 permissions:
   contents: read
