@@ -1,9 +1,6 @@
 name: Build desktop
 
 on:
-  push:
-    branches:
-      - feature/desktop-platforms
   workflow_dispatch:
 
 permissions:

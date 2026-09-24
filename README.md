@@ -121,8 +121,8 @@ hdiutil create -volname "Plana App" \
   -ov -format UDZO Plana-macOS.dmg
 ```
 
-`feature/desktop-platforms` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
-上执行检查并生成 ZIP / DMG artifact。当前 macOS artifact 名为
+`feature/desktop-platforms` 分支可手动运行 GitHub Actions,在原生 Windows 与 macOS
+runner 上检查并生成 ZIP / DMG artifact;push 不会自动打包。当前 macOS artifact 名为
 `Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,并在打包时实际验证
 登录钥匙串的写入、读取和删除。它没有 Apple Developer ID 签名和公证,首次打开仍会
 触发 Gatekeeper,但 Token 与 Bot 会话可以正常安全保存。若需消除系统的未认证开发者
