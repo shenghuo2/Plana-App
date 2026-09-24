@@ -70,6 +70,7 @@ class _TokenManagePageState extends ConsumerState<TokenManagePage> {
   Future<void> _refresh() async {
     final keys = ref.read(naiKeysStoreProvider).value ?? const <NaiKey>[];
     ref.invalidate(naiKeyStatusProvider);
+    ref.invalidate(naiProxyQuotaProvider);
     await Future.wait([for (final k in keys) _pull(k)]);
   }
 
@@ -77,7 +78,11 @@ class _TokenManagePageState extends ConsumerState<TokenManagePage> {
   /// 它自己那行会变成查询失败,别的行照常刷新完。
   Future<void> _pull(NaiKey k) async {
     try {
-      await ref.read(naiKeyStatusProvider(naiTargetOf(k)).future);
+      if (k.isProxyApi) {
+        await ref.read(naiProxyQuotaProvider(naiTargetOf(k)).future);
+      } else {
+        await ref.read(naiKeyStatusProvider(naiTargetOf(k)).future);
+      }
     } catch (_) {}
   }
 
@@ -636,6 +641,59 @@ class NaiKeyStatusLine extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = context.scheme;
     final small = context.texts.labelSmall!;
+    if (k.isProxyApi) {
+      final target = naiTargetOf(k);
+      final quota = ref.watch(naiProxyQuotaProvider(target));
+      return ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 36),
+        child: quota.when(
+          skipLoadingOnRefresh: false,
+          loading: () => Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '查询代理额度…',
+              style: small.copyWith(color: scheme.outline),
+            ),
+          ),
+          error: (_, _) => InkWell(
+            onTap: () => ref.invalidate(naiProxyQuotaProvider(target)),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '代理额度查询失败,点按重试',
+                style: small.copyWith(color: scheme.error),
+              ),
+            ),
+          ),
+          data: (q) => Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                [
+                  ?prefix,
+                  '代理点数 ${fmtInt(q.remainingAnlas)}',
+                  'Opus ${fmtInt(q.opusRemainingImages)} 张',
+                ].join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: small.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                '待核对 ${fmtInt(q.pendingAnlas)} 点 / '
+                '${fmtInt(q.opusPendingImages)} 张 · 排队 ${q.queueLength}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: small.copyWith(color: scheme.outline),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     final async = ref.watch(naiKeyStatusProvider(naiTargetOf(k)));
     return async.when(
       // 重查(下拉刷新、点按重试)也照样走 loading —— 见类文档。

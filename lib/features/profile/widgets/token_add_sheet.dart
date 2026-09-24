@@ -54,6 +54,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
   bool _obscureToken = true;
   bool _obscurePw = true;
   bool _obscureThird = true;
+  bool _proxyApi = false;
   bool _busy = false;
   String? _error;
 
@@ -172,11 +173,11 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
   /// 第三方:地址 + key 绑成一把存下。
   ///
   /// 形态不对当场挡下(漏协议、把整条 `…/ai/generate-image` 贴进来带了参数);
-  /// 通不通不在这里探 —— 中转站多半没开 GET,探测失败反而拦住能用的地址,
-  /// 真不通出图时会报。
+  /// 通用中转不探测;选 API Proxy 时用其受支持的 `/quota` 验证客户端 key。
   Future<void> _addThird() async {
     final t = _thirdKey.text.trim();
     final url = normalizeNaiBase(_url.text);
+    final proxyApi = _proxyApi;
     if (t.isEmpty || _busy) return;
     if (url.isEmpty || !naiBaseLooksValid(url)) {
       setState(() => _error = '请填 http:// 或 https:// 开头的接口地址');
@@ -187,9 +188,22 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       _busy = true;
       _error = null;
     });
-    final added = await ref
-        .read(naiKeysStoreProvider.notifier)
-        .add(t, endpoint: url);
+    NaiKey? added;
+    try {
+      if (proxyApi) {
+        await ref.read(naiClientProvider(url)).proxyQuota(t);
+      }
+      added = await ref
+          .read(naiKeysStoreProvider.notifier)
+          .add(t, endpoint: url, proxyApi: proxyApi);
+    } on NaiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = '代理验证失败: ${e.message}';
+      });
+      return;
+    }
     if (!mounted) return;
     if (added == null) {
       setState(() {
@@ -382,17 +396,36 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
 
   /// 第三方接口:地址和 key 一起填,绑成一把。
   ///
-  /// **不做在线校验**:这里查不出对面认不认这把 key —— `/user/subscription`
-  /// 是 NAI 官方的东西,中转站大多没实现,查失败会在「添加」之前就摆一行红字,
-  /// 而那把 key 多半是好的。
+  /// 通用中转不在线校验;API Proxy 只在保存时请求 `/quota`。
   Widget _thirdForm(ColorScheme scheme) => Column(
     key: const ValueKey('third'),
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Text(
-        '兼容 NovelAI 接口的中转站或自建反代。地址跟这把 key 绑在一起,'
-        '官方那几把照旧走官方。',
+        _proxyApi
+            ? '填写 NovelAI API Proxy 根地址和管理员签发的客户端 key。'
+                  '保存时验证 /quota,官方 Token 不会交给代理。'
+            : '兼容 NovelAI 接口的中转站或自建反代。地址跟这把 key 绑在一起,'
+                  '官方那几把照旧走官方。',
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),
+      ),
+      const SizedBox(height: 12),
+      SizedBox(
+        width: double.infinity,
+        child: SegmentedButton<bool>(
+          segments: const [
+            ButtonSegment(value: false, label: Text('通用中转')),
+            ButtonSegment(value: true, label: Text('API Proxy')),
+          ],
+          selected: {_proxyApi},
+          showSelectedIcon: false,
+          onSelectionChanged: _busy
+              ? null
+              : (v) => setState(() {
+                  _proxyApi = v.first;
+                  _error = null;
+                }),
+        ),
       ),
       const SizedBox(height: 12),
       TextField(
@@ -405,7 +438,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
         textInputAction: TextInputAction.next,
         style: mono(context, size: 13),
         decoration: _dec(
-          'https://example.com',
+          _proxyApi ? 'https://nai.example.com' : 'https://example.com',
           suffix: IconButton(
             onPressed: () => _paste(_url),
             icon: const Icon(Icons.content_paste, size: 20),

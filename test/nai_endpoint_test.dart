@@ -82,6 +82,27 @@ void main() {
     expect(naiBaseLooksValid('nai.example.com'), isFalse);
     expect(naiBaseLooksValid('ftp://nai.example.com'), isFalse);
     expect(naiBaseLooksValid('https://a.b/ai?token=x'), isFalse);
+    expect(naiBaseLooksValid('https://a.b/#token'), isFalse);
+    expect(naiBaseLooksValid('https://key@a.b'), isFalse);
+    expect(naiBaseLooksValid('https://a.b/ai/generate-image'), isFalse);
+    expect(naiBaseLooksValid('https://a.b/image/user/subscription'), isFalse);
+    expect(naiBaseLooksValid('https://a.b/quota'), isFalse);
+    expect(naiBaseLooksValid('https://a.b/image'), isTrue);
+  });
+
+  test('代理账本始终在根路径,/image 只用于图片接口', () {
+    expect(
+      naiProxyQuotaUri('https://proxy.example').toString(),
+      'https://proxy.example/quota',
+    );
+    expect(
+      naiProxyQuotaUri('https://proxy.example/image').toString(),
+      'https://proxy.example/quota',
+    );
+    expect(
+      naiProxyQuotaUri('https://proxy.example/prefix/image').toString(),
+      'https://proxy.example/prefix/quota',
+    );
   });
 
   test('主机名:整条 URL 只取主机,官方(空串)还是空串', () {
@@ -94,6 +115,68 @@ void main() {
   // (HttpOverrides 基类的 createHttpClient 就是它)。
   Future<void> withRealHttp(Future<void> Function() body) =>
       HttpOverrides.runWithHttpOverrides(body, _RealHttp());
+
+  test('代理额度使用客户端 Bearer key,拒绝无效 key 和异常响应', () async {
+    final paths = <String>[];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      paths.add(req.uri.path);
+      final auth = req.headers.value('authorization');
+      req.response.headers.contentType = ContentType.json;
+      if (auth == 'Bearer bad') {
+        req.response.statusCode = 401;
+      } else if (auth == 'Bearer blocked') {
+        req.response.statusCode = 402;
+      } else if (auth == 'Bearer malformed') {
+        req.response.write('{}');
+      } else if (auth == 'Bearer client-key') {
+        req.response.write(
+          jsonEncode({
+            'remaining_anlas': 42,
+            'pending_anlas': 3,
+            'opus_remaining_images': 8,
+            'opus_pending_images': 1,
+            'queue_length': 2,
+          }),
+        );
+      } else {
+        req.response.statusCode = 401;
+      }
+      await req.response.close();
+    });
+    addTearDown(() => server.close(force: true));
+
+    final client = NaiClient(base: 'http://127.0.0.1:${server.port}/image');
+    await withRealHttp(() async {
+      final quota = await client.proxyQuota('client-key');
+      expect(quota.remainingAnlas, 42);
+      expect(quota.pendingAnlas, 3);
+      expect(quota.opusRemainingImages, 8);
+      expect(quota.opusPendingImages, 1);
+      expect(quota.queueLength, 2);
+      await expectLater(
+        client.proxyQuota('bad'),
+        throwsA(
+          isA<NaiException>()
+              .having((e) => e.status, 'status', 401)
+              .having((e) => e.message, 'message', contains('已撤销')),
+        ),
+      );
+      await expectLater(
+        client.proxyQuota('blocked'),
+        throwsA(
+          isA<NaiException>()
+              .having((e) => e.status, 'status', 402)
+              .having((e) => e.message, 'message', contains('额度不足')),
+        ),
+      );
+      await expectLater(
+        client.proxyQuota('malformed'),
+        throwsA(isA<NaiException>()),
+      );
+    });
+    expect(paths, ['/quota', '/quota', '/quota', '/quota']);
+  });
 
   test('令牌自带的地址:生成与查点数都提交到那台机器', () async {
     final paths = <String>[];

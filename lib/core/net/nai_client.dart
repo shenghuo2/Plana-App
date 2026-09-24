@@ -77,6 +77,15 @@ typedef NaiSubscription = ({
   NaiUsage? usage,
 });
 
+/// NovelAI API Proxy 按客户端 key 计算的本地预算,不是官方账户原始账目。
+typedef NaiProxyQuota = ({
+  int remainingAnlas,
+  int pendingAnlas,
+  int opusRemainingImages,
+  int opusPendingImages,
+  int queueLength,
+});
+
 /// 档位显示名。
 String naiTierName(int tier) => switch (tier) {
   3 => 'Opus',
@@ -178,10 +187,16 @@ class NaiClient {
   /// [base] 为空 = 官方 [kNaiOfficialBase],此时开了 [proxy] 改经 [kNaiProxyBase];
   /// 非空则整条直连线改打它,[proxy] 不起作用。
   NaiClient({String base = '', bool proxy = false})
-    : _host = naiBaseOf(base, proxy: proxy);
+    : _host = naiBaseOf(base, proxy: proxy),
+      _customBase = base.isNotEmpty;
 
   /// `/ai/*` 与 `/user/subscription` 的基址(已带协议、无尾斜杠)。
   final String _host;
+  final bool _customBase;
+
+  // 自定义来源可能在服务端串行排队;超时后是否扣费无法确定,不能立即重试。
+  Duration get _queuedTimeout =>
+      _customBase ? const Duration(minutes: 15) : const Duration(seconds: 120);
 
   /// 仅供测试观察。
   String get host => _host;
@@ -262,7 +277,9 @@ class NaiClient {
       req.contentLength = payload.length;
       req.add(payload);
 
-      final resp = await req.close().timeout(const Duration(seconds: 60));
+      final resp = await req.close().timeout(
+        _customBase ? _queuedTimeout : const Duration(seconds: 60),
+      );
       if (resp.statusCode != 200) {
         final text = await resp
             .transform(utf8.decoder)
@@ -275,8 +292,10 @@ class NaiClient {
       }
 
       final buf = <int>[];
-      // 帧间隔超 90s 视为断流(出图步间通常 1~3s)
-      await for (final chunk in resp.timeout(const Duration(seconds: 90))) {
+      // 官方帧间隔超 90s 视为断流;自定义来源可能还在服务端排队。
+      await for (final chunk in resp.timeout(
+        _customBase ? _queuedTimeout : const Duration(seconds: 90),
+      )) {
         received += chunk.length;
         buf.addAll(chunk);
         var off = 0;
@@ -372,7 +391,7 @@ class NaiClient {
     try {
       resp = await client
           .post(uri, headers: _genHeaders(token), body: jsonEncode(body))
-          .timeout(const Duration(seconds: 120));
+          .timeout(_queuedTimeout);
     } catch (e) {
       throw NaiException('网络错误:$e');
     } finally {
@@ -471,7 +490,7 @@ class NaiClient {
               'declared_blur_sigma': declaredBlurSigma,
             }),
           )
-          .timeout(const Duration(seconds: 300));
+          .timeout(_customBase ? _queuedTimeout : const Duration(seconds: 300));
     } catch (e) {
       throw NaiException('网络错误:$e');
     }
@@ -513,6 +532,35 @@ class NaiClient {
     );
   }
 
+  /// 代理的 `/quota` 只读本地账本,用于验证客户端 key 和展示剩余额度。
+  Future<NaiProxyQuota> proxyQuota(String token) async {
+    final uri = naiProxyQuotaUri(_host);
+    final http.Response resp;
+    try {
+      resp = await http
+          .get(uri, headers: {'Authorization': 'Bearer $token'})
+          .timeout(const Duration(seconds: 20));
+    } catch (e) {
+      throw NaiException('无法连接代理:$e');
+    }
+    if (resp.statusCode != 200) {
+      throw NaiException(_errorText(resp), status: resp.statusCode);
+    }
+    try {
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      int field(String name) => (data[name] as num).toInt();
+      return (
+        remainingAnlas: field('remaining_anlas'),
+        pendingAnlas: field('pending_anlas'),
+        opusRemainingImages: field('opus_remaining_images'),
+        opusPendingImages: field('opus_pending_images'),
+        queueLength: field('queue_length'),
+      );
+    } catch (_) {
+      throw NaiException('代理额度响应格式不正确');
+    }
+  }
+
   /// Vibe 编码:POST /ai/encode-vibe(每次固定耗 2 Anlas)。
   /// 请求体 `{image: 原始 base64(无 data: 前缀), information_extracted, model}`;
   /// 直连响应是二进制向量 → base64 化(与 web token 模式 `btoa(binary)` 一致)。
@@ -541,7 +589,7 @@ class NaiClient {
               'model': model,
             }),
           )
-          .timeout(const Duration(seconds: 120));
+          .timeout(_queuedTimeout);
     } catch (e) {
       throw NaiException('编码参考图失败:$e');
     }
@@ -558,6 +606,15 @@ class NaiClient {
       final j = jsonDecode(body);
       if (j is Map && j['message'] is String) return j['message'] as String;
     } catch (_) {}
+    if (_customBase) {
+      return switch (code) {
+        401 => '接口 key 无效或已撤销',
+        402 => '接口 key 权限或额度不足',
+        429 => '接入服务排队已满或触发限流,请稍后重试',
+        502 => '接入服务上游暂不可用,请稍后检查服务状态',
+        _ => '请求失败(HTTP $code)',
+      };
+    }
     return switch (code) {
       401 => 'Token 无效或已过期',
       402 => '订阅 / 点数不足',

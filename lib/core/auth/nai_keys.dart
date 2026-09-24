@@ -20,6 +20,7 @@ class NaiKey {
     this.label = '',
     this.accessKey,
     this.endpoint = '',
+    this.proxyApi = false,
     this.primary = false,
     this.forGenerate = true,
     this.usePoints = true,
@@ -49,8 +50,13 @@ class NaiKey {
   /// 查点数)都按取到的那把 Key 的地址走。
   final String endpoint;
 
+  /// 该自定义地址实现了 NovelAI API Proxy 的 `/quota` 接口。
+  final bool proxyApi;
+
   /// 第三方接口(非官方地址)。官方那几把没有这个标记。
   bool get isThirdParty => endpoint.isNotEmpty;
+
+  bool get isProxyApi => isThirdParty && proxyApi;
 
   /// 是不是主账号。**和列表顺序无关** —— 早先拿「排第一」当主账号,于是选中一行
   /// 它就窜到顶上去,跟单选钮的行为完全不搭(单选钮从不会让选项换位置)。
@@ -77,6 +83,7 @@ class NaiKey {
     String? label,
     Object? accessKey = const Object(),
     String? endpoint,
+    bool? proxyApi,
     bool? primary,
     bool? forGenerate,
     bool? usePoints,
@@ -86,6 +93,7 @@ class NaiKey {
     label: label ?? this.label,
     accessKey: accessKey is String? ? accessKey : this.accessKey,
     endpoint: endpoint ?? this.endpoint,
+    proxyApi: proxyApi ?? this.proxyApi,
     primary: primary ?? this.primary,
     forGenerate: forGenerate ?? this.forGenerate,
     usePoints: usePoints ?? this.usePoints,
@@ -98,6 +106,7 @@ class NaiKey {
     if (accessKey != null) 'accessKey': accessKey,
     // 官方那几把不落这个字段,老条目读出来就是官方 —— 正好等于升级前的行为。
     if (endpoint.isNotEmpty) 'ep': endpoint,
+    if (isProxyApi) 'proxyApi': true,
     if (primary) 'primary': true,
     // 两个开关只在**非默认**时落盘:默认全开,老条目缺字段读出来就是全开,
     // 正好等于升级前的行为。
@@ -118,6 +127,7 @@ class NaiKey {
       label: j['label'] is String ? j['label'] as String : '',
       accessKey: ak is String && ak.isNotEmpty ? ak : null,
       endpoint: j['ep'] is String ? normalizeNaiBase(j['ep'] as String) : '',
+      proxyApi: j['proxyApi'] == true,
       // `off` 是上一版的总开关,已并入 forGenerate:那时「停用」就是「完全不用」,
       // 现在「不参与出图」也是完全不用(别的活只找主账号),语义正好对上。
       primary: j['primary'] == true,
@@ -317,6 +327,7 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
     String label = '',
     String? accessKey,
     String endpoint = '',
+    bool? proxyApi,
   }) async {
     final t = token.trim();
     if (t.isEmpty) return null;
@@ -327,6 +338,7 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
       final merged = cur[i].copyWith(
         label: label.isNotEmpty ? label : null,
         accessKey: accessKey ?? cur[i].accessKey,
+        proxyApi: ep.isNotEmpty && (proxyApi ?? cur[i].proxyApi),
       );
       await _persist([...cur]..[i] = merged);
       return merged;
@@ -338,6 +350,7 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
       label: label,
       accessKey: accessKey,
       endpoint: ep,
+      proxyApi: ep.isNotEmpty && (proxyApi ?? false),
     );
     await _persist([...cur, k]);
     return k;

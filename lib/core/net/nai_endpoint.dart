@@ -44,15 +44,42 @@ String normalizeNaiBase(String url) {
 
 /// 能不能当基址用:必须是带 http(s) 协议、有主机名、且不带查询串的 URL。
 ///
-/// 只挡明显填错的(漏协议、把整条 `…/ai/generate-image` 贴进来带了参数)。
+/// 只挡明显填错的(漏协议、把整条 `…/ai/generate-image` 贴成基址)。
 /// 对面通不通、是不是真的 NAI 兼容接口,这里验不出来,交给下一次请求报错 ——
 /// 这里替用户探一次的话,自建反代多半没开 GET,探测失败反而拦住能用的地址。
 bool naiBaseLooksValid(String url) {
   final u = Uri.tryParse(url);
-  return u != null &&
-      (u.scheme == 'http' || u.scheme == 'https') &&
-      u.host.isNotEmpty &&
-      !u.hasQuery;
+  if (u == null ||
+      (u.scheme != 'http' && u.scheme != 'https') ||
+      u.host.isEmpty ||
+      u.userInfo.isNotEmpty ||
+      u.hasQuery ||
+      u.hasFragment) {
+    return false;
+  }
+  final segments = u.pathSegments;
+  if (segments.isEmpty) return true;
+  final last = segments.last;
+  if (last == 'quota' || last == 'healthz') return false;
+  if (segments.length < 2) return true;
+  final parent = segments[segments.length - 2];
+  return !((parent == 'ai' &&
+          const {
+            'generate-image',
+            'generate-image-stream',
+            'upscale',
+            'encode-vibe',
+            'augment-image',
+          }.contains(last)) ||
+      (parent == 'user' && last == 'subscription'));
+}
+
+/// `/image` 是图片路由的可选前缀,但代理账本 `/quota` 始终在服务根路径。
+Uri naiProxyQuotaUri(String base) {
+  final uri = Uri.parse(base);
+  final segments = [...uri.pathSegments.where((segment) => segment.isNotEmpty)];
+  if (segments.isNotEmpty && segments.last == 'image') segments.removeLast();
+  return uri.replace(pathSegments: [...segments, 'quota']);
 }
 
 /// 界面上认地址用的主机名;空串(官方)也回空串。整条 URL 摆进列表行里

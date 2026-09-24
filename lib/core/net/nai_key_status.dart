@@ -24,3 +24,8 @@ final naiKeyStatusProvider = FutureProvider.autoDispose
     .family<NaiSubscription, NaiTarget>((ref, t) async {
       return ref.watch(naiClientProvider(t.base)).subscription(t.token);
     });
+
+final naiProxyQuotaProvider = FutureProvider.autoDispose
+    .family<NaiProxyQuota, NaiTarget>((ref, t) async {
+      return ref.watch(naiClientProvider(t.base)).proxyQuota(t.token);
+    });

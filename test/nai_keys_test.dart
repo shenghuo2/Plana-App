@@ -107,6 +107,32 @@ void main() {
       expect(back[1].isThirdParty, isTrue);
     });
 
+    test('代理来源跟 key 加密落盘,旧第三方仍按通用接口读取', () async {
+      final c = _container();
+      final s = await _store(c);
+      final proxy = await s.add(
+        'client-key',
+        endpoint: 'https://proxy.example.com/image/',
+        proxyApi: true,
+      );
+      await s.add('generic-key', endpoint: 'https://relay.example.com');
+      expect(proxy!.isProxyApi, isTrue);
+      expect(proxy.endpoint, 'https://proxy.example.com/image');
+
+      // 旧调用方重复添加同一把时,不能悄悄抹掉代理来源。
+      final again = await s.add(
+        'client-key',
+        endpoint: 'https://proxy.example.com/image',
+      );
+      expect(again!.id, proxy.id);
+      expect(again.isProxyApi, isTrue);
+
+      final back = await _container().read(naiKeysStoreProvider.future);
+      expect(back[0].isProxyApi, isTrue);
+      expect(back[1].isThirdParty, isTrue);
+      expect(back[1].isProxyApi, isFalse);
+    });
+
     test('填成官方地址本身 = 官方,不算第三方', () async {
       final s = await _store(_container());
       final k = await s.add('tok', endpoint: '$kNaiOfficialBase/');

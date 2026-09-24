@@ -554,6 +554,7 @@ class _AccessStepState extends ConsumerState<_AccessStep>
   /// 它不是第三种**接入方式** —— 接入方式仍是直连,只是不打官方那台机器,
   /// 所以做成卡内的分段而不是第三张卡。
   bool _third = false;
+  bool _proxyApi = false;
 
   /// 第三方地址填得不成形时的当场提示(官方那一路没有这一栏)。
   String? _urlError;
@@ -673,17 +674,31 @@ class _AccessStepState extends ConsumerState<_AccessStep>
   Future<void> _saveToken() async {
     final t = _tokenCtrl.text.trim();
     if (t.isEmpty) return;
-    // 第三方:地址跟这把 key 绑成一把存下。形态不对当场挡下;通不通不在这里探
-    // —— 中转站多半没开 GET,探测失败反而拦住能用的地址。
+    final proxyApi = _third && _proxyApi;
+    // 第三方地址跟 key 绑在一起;通用中转不探测,API Proxy 用 /quota 验证。
     final url = _third ? normalizeNaiBase(_urlCtrl.text) : '';
     if (_third && (url.isEmpty || !naiBaseLooksValid(url))) {
       setState(() => _urlError = '请填 http:// 或 https:// 开头的接口地址');
       return;
     }
     setState(() => _saving = true);
+    if (proxyApi) {
+      try {
+        await ref.read(naiClientProvider(url)).proxyQuota(t);
+      } on NaiException catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _saving = false;
+          _urlError = '代理验证失败: ${e.message}';
+        });
+        return;
+      }
+    }
     // 手贴的这把不带续期凭证,到期需重贴。凭证现在跟着每把 Key 存,所以不必
     // 再作废什么 —— 不存在「续期把令牌换成别的账号」这条老坑了。
-    await ref.read(naiKeysStoreProvider.notifier).add(t, endpoint: url);
+    await ref
+        .read(naiKeysStoreProvider.notifier)
+        .add(t, endpoint: url, proxyApi: proxyApi);
     if (!mounted) return;
     setState(() => _saving = false);
     await ref.read(authModeProvider.notifier).set(AuthMode.token);
@@ -771,11 +786,45 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                   child: _third
                       ? Padding(
                           padding: const EdgeInsets.fromLTRB(0, 9, 0, 9),
-                          child: Text(
-                            '兼容 NovelAI 接口的中转站或自建反代,地址跟这把 key 一起存',
-                            style: context.texts.labelSmall!.copyWith(
-                              color: scheme.outline,
-                            ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text(
+                                _proxyApi
+                                    ? '填代理根地址和客户端 key,保存时验证 /quota'
+                                    : '兼容 NovelAI 接口的中转站或自建反代,地址跟 key 一起存',
+                                style: context.texts.labelSmall!.copyWith(
+                                  color: scheme.outline,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SegmentedButton<bool>(
+                                segments: const [
+                                  ButtonSegment(
+                                    value: false,
+                                    label: Text('通用中转'),
+                                  ),
+                                  ButtonSegment(
+                                    value: true,
+                                    label: Text('API Proxy'),
+                                  ),
+                                ],
+                                selected: {_proxyApi},
+                                showSelectedIcon: false,
+                                style: SegmentedButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                  textStyle: context.texts.labelMedium,
+                                ),
+                                onSelectionChanged: _saving
+                                    ? null
+                                    : (v) => setState(() {
+                                        _proxyApi = v.first;
+                                        _urlError = null;
+                                      }),
+                              ),
+                            ],
                           ),
                         )
                       : Padding(
@@ -830,7 +879,9 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                             style: mono(context, size: 12),
                             decoration: _fieldDec(
                               scheme,
-                              'https://example.com',
+                              _proxyApi
+                                  ? 'https://nai.example.com'
+                                  : 'https://example.com',
                               suffix: IconButton(
                                 onPressed: () => _paste(_urlCtrl),
                                 icon: const Icon(Icons.content_paste, size: 18),
