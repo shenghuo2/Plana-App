@@ -77,6 +77,8 @@ void main() {
     expect(added.hasInput, isTrue);
 
     stores1.flushNow(); // 模拟退后台立即落盘
+    await stores1.workspace.idle;
+    await stores1.gallery.idle;
     final stateFile = File('${root.path}/workspace/state.json');
     final indexFile = File('${root.path}/gallery/index.json');
     final imageFile = File('${root.path}/gallery/images/${added.id}.png');
@@ -135,6 +137,8 @@ void main() {
 
     // 排空第二次落盘链再进 teardown,避免删目录撞上进行中的写句柄
     stores2.flushNow();
+    await stores2.workspace.idle;
+    await stores2.gallery.idle;
     final againFile = File('${root.path}/gallery/images/${again.id}.png');
     await _until(() => againFile.exists());
     await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -297,7 +301,7 @@ void main() {
     final aFile = File('${root.path}/gallery/images/${a.id}.png');
     expect(aFile.existsSync(), isTrue);
 
-    gal.clearAll();
+    await gal.clearAll();
     await stores.gallery.idle;
     expect(aFile.existsSync(), isFalse);
     expect(c.read(galleryProvider).results, isEmpty);
@@ -312,7 +316,7 @@ void main() {
     expect([for (final r in stores2.gallery.initialResults) r.id], [b.id]);
   });
 
-  test('批量删除:状态移除、文件同删、选中回退最新', () async {
+  test('批量删除:状态移除、文件同删、选中保持相邻图片', () async {
     final root = Directory.systemTemp.createTempSync('plana_delete');
     addTearDown(() async {
       for (var i = 0; i < 10; i++) {
@@ -339,7 +343,7 @@ void main() {
     gal.deleteResults([ids[3], ids[0]]);
     final s = c.read(galleryProvider);
     expect([for (final r in s.results) r.id], [ids[2], ids[1]]);
-    expect(s.selectedId, ids[2]); // 选中项被删 → 回退剩余最新
+    expect(s.selectedId, ids[2]); // 最前面的选中项被删 → 相邻旧图
     await stores.gallery.idle;
     expect(
       File('${root.path}/gallery/images/${ids[3]}.png').existsSync(),

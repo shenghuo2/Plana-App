@@ -9,6 +9,7 @@ import '../../core/theme/app_theme.dart';
 import '../generate/widgets/common.dart' show hintSnack;
 import '../profile/widgets/settings_ui.dart';
 import 'update_download.dart';
+import 'release_notes.dart';
 import 'update_service.dart';
 
 /// 「检查更新」行。放在关于页,按设置行规范:单行 + 右侧状态,不写副标题。
@@ -284,10 +285,7 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: SingleChildScrollView(
-                      child: Text(
-                        widget.release.notes,
-                        style: context.texts.bodySmall!.copyWith(height: 1.55),
-                      ),
+                      child: ReleaseNotes(widget.release.notes),
                     ),
                   ),
                 ],

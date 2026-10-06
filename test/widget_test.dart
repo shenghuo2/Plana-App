@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:plana_app/core/auth/auth_mode.dart';
+import 'package:plana_app/core/net/anlas_provider.dart';
+import 'package:plana_app/core/net/nai_client.dart';
 import 'package:plana_app/core/store/app_stores.dart';
 import 'package:plana_app/core/store/gen_settings.dart';
 import 'package:plana_app/features/gallery/gallery_page.dart';
@@ -21,6 +23,12 @@ class _PrimedSettings extends GenSettingsNotifier {
   Future<GenSettings> build() async => const GenSettings(notifyPrimed: true);
 }
 
+/// 同理没有主账号可读:点数直接按「没数」收尾。
+class _NoAnlas extends AnlasNotifier {
+  @override
+  Future<NaiSubscription?> build() async => null;
+}
+
 Future<void> _pumpApp(WidgetTester tester) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -28,6 +36,7 @@ Future<void> _pumpApp(WidgetTester tester) async {
         appStoresProvider.overrideWithValue(AppStores.ephemeral()),
         authModeProvider.overrideWith(_TokenMode.new),
         genSettingsProvider.overrideWith(_PrimedSettings.new),
+        anlasProvider.overrideWith(_NoAnlas.new),
       ],
       child: const PlanaApp(),
     ),
@@ -62,9 +71,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 900));
   });
 
-  testWidgets('桌面跨导航断点缩放时保留当前页面且导航仍可用', (
-    WidgetTester tester,
-  ) async {
+  testWidgets('桌面跨导航断点缩放时保留当前页面且导航仍可用', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -156,9 +163,7 @@ void main() {
     return tester.getSize(find.byType(CostPill));
   }
 
-  testWidgets('费用胶囊:免费与两位数点数完全等宽等高', (
-    WidgetTester tester,
-  ) async {
+  testWidgets('费用胶囊:免费与两位数点数完全等宽等高', (WidgetTester tester) async {
     final free = await pumpPill(tester, 0);
     final two = await pumpPill(tester, 35);
     expect(free.width, equals(two.width));
@@ -166,18 +171,14 @@ void main() {
     expect((await pumpPill(tester, 7)).width, equals(two.width));
   });
 
-  testWidgets('费用胶囊:三位数撑开,且不会撑满可用宽度', (
-    WidgetTester tester,
-  ) async {
+  testWidgets('费用胶囊:三位数撑开,且不会撑满可用宽度', (WidgetTester tester) async {
     final two = await pumpPill(tester, 35);
     final three = await pumpPill(tester, 350);
     expect(three.width, greaterThan(two.width));
     expect(three.width, lessThan(80));
   });
 
-  testWidgets('生成按钮的费用胶囊只占内容宽,不会撑满整颗按钮', (
-    WidgetTester tester,
-  ) async {
+  testWidgets('生成按钮的费用胶囊只占内容宽,不会撑满整颗按钮', (WidgetTester tester) async {
     await _pumpApp(tester);
 
     final pill = find.descendant(
