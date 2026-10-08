@@ -19,6 +19,10 @@ class BlobStore {
 
   final Directory _dir;
 
+  /// 工作台、图库、助手各自排队保存,同一 blob 的并发调用共享一次写入,
+  /// 避免争用原子写的临时文件。
+  final Map<String, Future<void>> _writes = {};
+
   /// bytes 对象 → 已算过的哈希备忘(同一对象在防抖保存里反复出现,
   /// 不重复算 sha256)。
   static final Expando<String> _hashMemo = Expando<String>();
@@ -44,8 +48,18 @@ class BlobStore {
   /// 哈希对不上,却会被后续 [get] 当成有效缓存命中 —— 比文件缺失更糟。
   Future<String> put(Uint8List bytes, {String? known}) async {
     final h = await hashOf(bytes, known: known);
-    final f = _fileOf(h);
-    if (!await f.exists()) await writeBytesAtomic(f, bytes);
+    final write = _writes.putIfAbsent(h, () async {
+      final f = _fileOf(h);
+      if (!await f.exists()) await writeBytesAtomic(f, bytes);
+    });
+    try {
+      await write;
+    } finally {
+      // 成功或失败都释放;失败后下一次保存仍可重试。
+      if (identical(_writes[h], write)) {
+        final _ = _writes.remove(h);
+      }
+    }
     return h;
   }
 
