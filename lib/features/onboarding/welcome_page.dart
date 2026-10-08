@@ -792,7 +792,7 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                               Text(
                                 _proxyApi
                                     ? '填代理根地址和客户端 key,保存时验证 /quota'
-                                    : '兼容 NovelAI 接口的中转站或自建反代,地址跟 key 一起存',
+                                    : '兼容 NovelAI 接口的中转站或自建反代',
                                 style: context.texts.labelSmall!.copyWith(
                                   color: scheme.outline,
                                 ),
