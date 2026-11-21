@@ -118,7 +118,8 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 - `ANDROID_KEY_PASSWORD`: 发布私钥密码
 
 `dev` 仅快进跟随上游,功能在 `feature/*` 开发。未来版本在 `release/*` 整合,
-经 Android、Windows、macOS 构建和验收后,从已验证提交手动发布 GitHub Release。
+经 Android 构建和验收后,从已验证提交手动发布 GitHub Release。桌面端
+(`feature/desktop-platforms`、Windows / macOS 构建)已移至独立仓库维护,本仓库不再构建或发布桌面端产物。
 只有非草稿、非 prerelease 的正式版才合并到 `main`;任何分支的 push 都不得自动发布。
 历史分支和 tag 保留。具体约束见 [AGENTS.md](AGENTS.md)。
 
