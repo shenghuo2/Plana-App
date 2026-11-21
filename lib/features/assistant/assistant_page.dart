@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/store/app_stores.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/util/haptics.dart';
 import '../../core/util/image_pick.dart';
@@ -31,11 +32,19 @@ import '../generate/widgets/common.dart'
 import '../shell/shell_state.dart';
 import 'agent_model.dart';
 import 'assistant_mode.dart';
-import 'assistant_models.dart';
+import 'domain/conversation.dart';
 import 'assistant_settings.dart';
-import 'assistant_state.dart';
-import 'preset_rules.dart' show RulesFamily, rulesFamilyOf;
+import 'application/assistant_controller.dart';
+import 'application/draft_images.dart';
+import 'application/proposal_service.dart' show canvasHasContent;
+import 'domain/image_model.dart';
+import 'domain/image_gen.dart' show kMaxImageCount;
+import 'image_gen/image_models.dart'
+    show ImageModelChoice, assistantImageModelProvider;
+import 'presets/preset_rule.dart' show RulesFamily, rulesFamilyOf;
+import 'widgets/attach_pick.dart';
 import 'widgets/history_sheet.dart';
+import 'widgets/image_option_sheet.dart';
 import 'widgets/inline_images.dart';
 import 'widgets/intro_dialog.dart';
 import 'widgets/mode_sheet.dart';
@@ -46,17 +55,18 @@ import 'widgets/result_strip.dart';
 import 'widgets/settings_sheet.dart';
 import 'widgets/think_sheet.dart';
 import 'widgets/tool_trail.dart';
+import '../../l10n/l10n.dart';
 
 /// 对话列表里「正在跑」那一条的 key。消息 id 是时间戳拼的,撞不上。
 const _kLiveKey = '__live';
 
 /// 开场白。`canvas` = 这句话离了创作页那串词就没意义,点它等于顺手替用户勾上
 /// 「引用创作页」;创作页是空的时候这类开场白整条不出(点了也只能得到一句「你还没写」)。
-const _suggests = <({String text, bool canvas})>[
-  (text: '画一个白发红瞳的猫娘,站在樱花树下', canvas: false),
-  (text: '帮我抽一个好看的画风', canvas: false),
-  (text: '随机画一个蔚蓝档案的角色', canvas: false),
-  (text: '看看我现在这串 tag 有什么问题', canvas: true),
+List<({String text, bool canvas})> _suggests(AppLocalizations l) => [
+  (text: l.suggest1, canvas: false),
+  (text: l.suggest2, canvas: false),
+  (text: l.suggest3, canvas: false),
+  (text: l.suggest4, canvas: true),
 ];
 
 class AssistantPage extends ConsumerStatefulWidget {
@@ -66,11 +76,11 @@ class AssistantPage extends ConsumerStatefulWidget {
   ConsumerState<AssistantPage> createState() => _AssistantPageState();
 }
 
-class _AssistantPageState extends ConsumerState<AssistantPage> {
+class _AssistantPageState extends ConsumerState<AssistantPage>
+    with AutomaticKeepAliveClientMixin {
   final _input = TextEditingController();
   final _inputFocus = FocusNode();
   final _scroll = ScrollController();
-  PickedImage? _pending;
 
   /// 这一条要不要把创作页的提示词带上。**纯一次性:每发一次回到关**,和带图一样。
   ///
@@ -88,6 +98,10 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
     super.dispose();
   }
 
+  /// 切 tab 时保住输入框、待发的图和对话滚动位置。
+  @override
+  bool get wantKeepAlive => true;
+
   /// 回到底部。列表是**倒着**的(见 [_list]),所以底 = offset 0,一个常数 ——
   /// 不必去问 `maxScrollExtent`(懒加载列表那个值是估的,本来就够不着真底)。
   void _toBottom() {
@@ -97,27 +111,50 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
 
   /// [canvas] 给开场白用:那几句自带「要不要引用创作页」的答案,不必先让用户
   /// 去按一下按钮。其余情况一律看用户勾没勾。
+  ///
+  /// 正在跑时发的排进队里;输入框空着按发送 = 接着发排着的(停下 / 出错之后)。
   Future<void> _send({String? preset, bool? canvas}) async {
+    final n = ref.read(assistantProvider.notifier);
     final text = preset ?? _input.text;
-    if (text.trim().isEmpty && _pending == null) return;
-    final img = _pending;
+    final imgs = ref.read(draftImagesProvider);
+    if (text.trim().isEmpty && imgs.isEmpty) {
+      _toBottom();
+      await n.resumeQueue();
+      return;
+    }
     final withCanvas = canvas ?? _withCanvas;
+    final queued = ref.read(assistantProvider).running;
     _input.clear();
-    setState(() {
-      _pending = null;
-      _withCanvas = false; // 一次性:发完就回到关
-    });
-    FocusScope.of(context).unfocus();
+    ref.read(draftImagesProvider.notifier).clear();
+    setState(() => _withCanvas = false); // 一次性:发完就回到关
+    // 排队时留着键盘,接着写下一句
+    if (!queued) _inputFocus.unfocus();
     _toBottom();
-    await ref
-        .read(assistantProvider.notifier)
-        .send(text, image: img?.bytes, withCanvas: withCanvas);
+    await n.submit(
+      text,
+      images: [for (final i in imgs) i.bytes],
+      withCanvas: withCanvas,
+    );
     _toBottom();
   }
 
+  /// 附图:先选从系统相册还是图库挑,一次可以多选,最多 [kMaxAttach] 张,多出来的不收。
   Future<void> _pick() async {
-    final img = await pickImageFile(context);
-    if (img != null && mounted) setState(() => _pending = img);
+    final drafts = ref.read(draftImagesProvider.notifier);
+    void full() => hintSnack(
+      context,
+      context.l10n.imagesMax(kMaxAttach),
+      icon: Icons.image_outlined,
+    );
+    final room = kMaxAttach - ref.read(draftImagesProvider).length;
+    if (room <= 0) return full();
+    final source = await showAttachSourceDialog(context);
+    if (source == null || !mounted) return;
+    final picked = source == AttachSource.gallery
+        ? await pickGalleryImages(context, ref, max: room)
+        : await pickImageFiles(context);
+    if (picked.isEmpty || !mounted) return;
+    if (drafts.add(picked) < picked.length) full();
   }
 
   /// 「新对话」。**不弹回执** —— 这个动作本来就没有后果:上一段原样躺在
@@ -144,15 +181,21 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final scheme = context.scheme;
     final st = ref.watch(assistantProvider);
+    // 选着图像模型就直接出图,和创作页那边的 NAI 模型、对话模型都不相干
+    final drawing = ref.watch(assistantImageModelProvider) != null;
     // 没有 Bot 授权也能用,但只能走免费模型或自定义接口:两样都没有就先挡住
     final usable =
+        drawing ||
         ref.watch(assistantBackendAvailableProvider) ||
         ref.watch(assistantEndpointProvider) != null;
-    final supported = assistantSupportsModel(
-      ref.watch(generateProvider.select((g) => g.params.model)),
-    );
+    final supported =
+        drawing ||
+        assistantSupportsModel(
+          ref.watch(generateProvider.select((g) => g.params.model)),
+        );
     _maybeShowIntro();
 
     return Column(
@@ -166,7 +209,7 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
                 ? const _ModelGate(key: ValueKey('model-gate'))
                 : !usable
                 ? const _Gate(key: ValueKey('gate'))
-                : st.isEmpty && !st.running
+                : st.isEmpty && !st.running && st.queue.isEmpty
                 ? KeyedSubtree(
                     key: const ValueKey('empty'),
                     child: _empty(scheme),
@@ -203,10 +246,16 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(
-                        'AI 助手',
-                        style: context.texts.titleLarge!.copyWith(
-                          fontWeight: FontWeight.w700,
+                      Flexible(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            context.l10n.aiAssistant,
+                            style: context.texts.titleLarge!.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 6),
@@ -219,7 +268,8 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
                       Flexible(
                         child: Text(
                           // 列表还没到货就先不报名字 —— 报错的名字比不报更糟。
-                          ref.watch(assistantModelProvider)?.name ?? '选择模型',
+                          ref.watch(assistantModelProvider)?.name ??
+                              context.l10n.selectModel,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: context.texts.labelMedium!.copyWith(
@@ -241,17 +291,17 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
           ),
         ),
         IconButton(
-          tooltip: '助手设置',
+          tooltip: context.l10n.assistantSettings,
           onPressed: () => showAssistantSettings(context),
           icon: const Icon(Icons.tune),
         ),
         IconButton(
-          tooltip: '历史会话',
+          tooltip: context.l10n.chatHistory,
           onPressed: () => showHistorySheet(context),
           icon: const Icon(Icons.history),
         ),
         IconButton(
-          tooltip: '新对话',
+          tooltip: context.l10n.newChat,
           onPressed: st.isEmpty ? null : _newChat,
           icon: const Icon(Icons.edit_square),
         ),
@@ -271,28 +321,31 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
           Padding(
             padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
             child: Text(
-              '想画什么,直接说',
+              context.l10n.askAnything,
               style: context.texts.titleSmall!.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
             ),
           ),
-          for (final s in _suggests)
+          for (final s in _suggests(context.l10n))
             if (!s.canvas || canvasHasContent(ref.watch(generateProvider)))
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-                child: Material(
-                  color: scheme.surfaceContainerLow,
-                  borderRadius: BorderRadius.circular(12),
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () => _send(preset: s.text, canvas: s.canvas),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 13,
+                child: Lifted(
+                  radius: BorderRadius.circular(12),
+                  child: Material(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(12),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => _send(preset: s.text, canvas: s.canvas),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 13,
+                        ),
+                        child: Text(s.text, style: context.texts.bodyMedium),
                       ),
-                      child: Text(s.text, style: context.texts.bodyMedium),
                     ),
                   ),
                 ),
@@ -330,6 +383,9 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
       }
     }
     final running = st.running;
+    final queue = st.queue;
+    final nq = queue.length;
+    final live = running ? 1 : 0;
     final now = DateTime.now().millisecondsSinceEpoch;
     final fontSize =
         ref.watch(assistantSettingsProvider.select((s) => s.value?.fontSize)) ??
@@ -338,18 +394,42 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
       controller: _scroll,
       reverse: true,
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
-      itemCount: st.msgs.length + (running ? 1 : 0),
+      itemCount: nq + live + st.msgs.length,
       // 按 key 找回每条的位置。新消息插在最下面(下标 0),不给 key 的话旧元素会按下标
       // 错配到新消息上 —— 状态串门,进场动画也分不清谁是新来的。
       findChildIndexCallback: (key) {
         if (key is! ValueKey<String>) return null;
-        if (key.value == _kLiveKey) return running ? 0 : null;
+        if (key.value == _kLiveKey) return running ? nq : null;
+        final qi = queue.indexWhere((q) => q.id == key.value);
+        if (qi >= 0) return nq - 1 - qi;
         final at = st.msgs.indexWhere((m) => m.id == key.value);
-        return at < 0 ? null : st.msgs.length - 1 - at + (running ? 1 : 0);
+        return at < 0 ? null : st.msgs.length - 1 - at + nq + live;
       },
       itemBuilder: (context, i) {
-        // 倒序:i=0 是最下面那条。跑起来时正在跑的那一轮占着最下面。
-        if (running && i == 0) {
+        // 倒序:i=0 是最下面那条。排着的几句在最下面,队首挨着正在跑的那一轮;
+        // 发出去时那条消息沿用队里的 id,气泡原地转正
+        if (i < nq) {
+          final q = queue[nq - 1 - i];
+          return _Enter(
+            key: ValueKey(q.id),
+            animate: now - q.at < 1500,
+            grow: true,
+            child: _MsgTile(
+              msg: AssistantMsg(
+                id: q.id,
+                role: MsgRole.user,
+                text: q.text.trim(),
+                at: q.at,
+                withCanvas: q.withCanvas,
+              ),
+              queued: true,
+              queuedImages: q.images,
+              fontSize: fontSize,
+              onLongPress: () => _queuedMenu(q),
+            ),
+          );
+        }
+        if (running && i == nq) {
           return _Enter(
             key: const ValueKey(_kLiveKey),
             animate: true,
@@ -357,7 +437,7 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
             child: _LiveTurn(state: st, fontSize: fontSize),
           );
         }
-        final at = st.msgs.length - 1 - (running ? i - 1 : i);
+        final at = st.msgs.length - 1 - (i - nq - live);
         final m = st.msgs[at];
         // 报错上直接给「重试」:只给最后一条、而且紧跟在提问后面的那种。
         // 发之前就被拦下的(比如没选模型接口)前面不是提问,重试只会把上一轮的话再发一遍。
@@ -407,6 +487,8 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
     Haptics.medium();
     final n = ref.read(assistantProvider.notifier);
     final isUser = m.role == MsgRole.user;
+    // 跑着的时候不能截断对话:回复会接在截断后的位置上
+    final idle = !ref.read(assistantProvider).running;
     final action = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
@@ -415,20 +497,25 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
           children: [
             ListTile(
               leading: const Icon(Icons.copy_outlined),
-              title: const Text('复制内容'),
+              title: Text(context.l10n.copyContent),
               onTap: () => Navigator.pop(context, 'copy'),
             ),
-            if (isUser)
+            if (isUser && idle)
               ListTile(
                 leading: const Icon(Icons.edit_outlined),
-                title: const Text('编辑该消息'),
+                title: Text(context.l10n.editMessage),
                 onTap: () => Navigator.pop(context, 'edit'),
               ),
-            ListTile(
-              leading: const Icon(Icons.refresh),
-              title: Text(isUser ? '从这里重新生成' : '重新生成'),
-              onTap: () => Navigator.pop(context, 'retry'),
-            ),
+            if (idle)
+              ListTile(
+                leading: const Icon(Icons.refresh),
+                title: Text(
+                  isUser
+                      ? context.l10n.regenerateFromHere
+                      : context.l10n.regenerate,
+                ),
+                onTap: () => Navigator.pop(context, 'retry'),
+              ),
           ],
         ),
       ),
@@ -463,6 +550,63 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
     }
   }
 
+  /// 排着的那句长按:复制 / 拿回输入框改 / 取消发送。
+  Future<void> _queuedMenu(QueuedAsk q) async {
+    Haptics.medium();
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.copy_outlined),
+              title: Text(context.l10n.copyContent),
+              onTap: () => Navigator.pop(context, 'copy'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: Text(context.l10n.editMessage),
+              onTap: () => Navigator.pop(context, 'edit'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.close),
+              title: Text(context.l10n.cancelSend),
+              onTap: () => Navigator.pop(context, 'cancel'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action != 'edit') dropFocusSoon();
+    if (action == null || !mounted) return;
+    final n = ref.read(assistantProvider.notifier);
+    // 菜单开着的时候可能已经轮到它发出去了
+    final still = ref.read(assistantProvider).queue.any((e) => e.id == q.id);
+    switch (action) {
+      case 'copy':
+        await copyText(context, q.text);
+      case 'cancel' when still:
+        n.unqueue(q.id);
+      case 'edit' when still:
+        n.unqueue(q.id);
+        // 输入框里正写着的接在后面,不覆盖
+        final draft = _input.text;
+        final t = draft.trim().isEmpty ? q.text : '${q.text}\n$draft';
+        _input.text = t;
+        _input.selection = TextSelection.collapsed(offset: t.length);
+        if (ref.read(draftImagesProvider).isEmpty && q.images.isNotEmpty) {
+          ref.read(draftImagesProvider.notifier).set([
+            for (final b in q.images) PickedImage('image', b),
+          ]);
+        }
+        if (q.withCanvas) setState(() => _withCanvas = true);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _inputFocus.requestFocus();
+        });
+    }
+  }
+
   /// 从某一句提问重来。和 [_send] 一样先回到底部:重来的那一轮出在最下面,
   /// 而长按菜单多半是停在上面某条消息上点的。
   Future<void> _retryFrom(String askId) async {
@@ -478,9 +622,9 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
     if (!mounted) return false;
     return confirmDialog(
       context,
-      title: '丢掉之后的对话?',
-      message: '这条之后的对话都会丢掉,已经写进创作页的改动不受影响。',
-      confirmLabel: '丢掉',
+      title: context.l10n.discardAfterQ,
+      message: context.l10n.discardAfterBody,
+      confirmLabel: context.l10n.discard,
     );
   }
 
@@ -489,7 +633,10 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
   /// 单独占一行而不是塞进输入框左边那排图标里:芯片带文字,开没开一眼能读出来;
   /// 图标只能靠颜色表示状态,而这排里的东西按错了是要花钱或者改画布的。
   /// 横向可滚,以后再加选项直接往后排,不会把输入框挤窄。
-  Widget _optionRow(bool running, bool hasCanvas) {
+  Widget _optionRow(bool hasCanvas) {
+    if (ref.watch(assistantImageModelProvider) case final m?) {
+      return _imageOptionRow(m);
+    }
     // 能开哪几个模式跟着这个模型在用的预设走。还没取到时先不拦 —— 发的时候会再核一遍
     final family = rulesFamilyOf(
       agentImageModel(
@@ -524,47 +671,149 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
               avatar: Icon(
                 _withCanvas ? Icons.draw : Icons.draw_outlined,
                 size: 16,
+                color: context.chipIcon(_withCanvas),
               ),
+              deleteIconColor: context.chipIcon(_withCanvas),
               // 附上之后改叫「创作页」:带没带已经由填色和 ✕ 说清了,
               // 再留着动词反而像还没按。
               //
               // 两态都不报「23 个 tag · 2 个角色」—— 那串数字读一遍才知道说的是
               // 什么,而这枚芯片要回答的只有「这条带不带」;想确认内容切过去看。
-              label: Text(_withCanvas ? '创作页' : '引用创作页'),
-              onDeleted: _withCanvas && !running
+              label: Text(
+                _withCanvas
+                    ? context.l10n.createPageShort
+                    : context.l10n.quoteCreatePage,
+              ),
+              onDeleted: _withCanvas
                   ? () => setState(() => _withCanvas = false)
                   : null,
               // 画布空着时**不置灰**:灰按钮按下去没反应,用户只会以为坏了。
               // 照常可点,点了说一句为什么。
-              onPressed: running
-                  ? null
-                  : () {
-                      if (_withCanvas) {
-                        setState(() => _withCanvas = false);
-                        return;
-                      }
-                      if (!hasCanvas) {
-                        hintSnack(
-                          context,
-                          '创作页还没写提示词,没东西可引用',
-                          icon: Icons.draw_outlined,
-                        );
-                        return;
-                      }
-                      setState(() => _withCanvas = true);
-                    },
+              onPressed: () {
+                if (_withCanvas) {
+                  setState(() => _withCanvas = false);
+                  return;
+                }
+                if (!hasCanvas) {
+                  hintSnack(
+                    context,
+                    context.l10n.createPageEmpty,
+                    icon: Icons.draw_outlined,
+                  );
+                  return;
+                }
+                setState(() => _withCanvas = true);
+              },
             ),
             const SizedBox(width: 8),
-            _modeChip(running, family, shown: shown, usable: usable),
-            // 思考等级只对自定义接口有意义:后端渠道的推理档位由服务端按渠道
-            // 定死,app 没有可下发的字段。摆一颗按了不生效的芯片比不摆更糟。
-            if (ref.watch(assistantEndpointProvider) != null) ...[
-              const SizedBox(width: 8),
-              _thinkChip(running),
-            ],
+            _modeChip(family, shown: shown, usable: usable),
+            const SizedBox(width: 8),
+            _thinkChip(),
           ],
         ),
       ),
+    );
+  }
+
+  /// 选着图像模型时那排换成出图的快捷设置:分辨率、比例、张数。
+  ///
+  /// 这几项跟着设置走、不是一次性的;这个模型出不了的置灰、显示生效的「自动」,
+  /// 点了说一句为什么(和「思考」那颗一样)。
+  Widget _imageOptionRow(ImageModelChoice m) {
+    final s =
+        ref.watch(assistantSettingsProvider).value ?? const AssistantSettings();
+    final n = ref.read(assistantSettingsProvider.notifier);
+    final size = m.sizes.contains(s.imageSize) ? s.imageSize : '';
+    final aspect = m.aspects.contains(s.imageAspect) ? s.imageAspect : '';
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, bottom: 8),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            _imageOptionChip(
+              icon: Icons.photo_size_select_large_outlined,
+              label: context.l10n.resolutionChip(
+                size.isEmpty ? context.l10n.imageAuto : size,
+              ),
+              on: size.isNotEmpty,
+              enabled: m.sizes.isNotEmpty,
+              onTap: () async {
+                final v = await showImageOptionSheet(
+                  context,
+                  title: context.l10n.resolution,
+                  options: m.sizes,
+                  current: size,
+                );
+                if (v != null) await n.patch((x) => x.copyWith(imageSize: v));
+              },
+            ),
+            const SizedBox(width: 8),
+            _imageOptionChip(
+              icon: Icons.aspect_ratio,
+              label: context.l10n.aspectChip(
+                aspect.isEmpty ? context.l10n.imageAuto : aspect,
+              ),
+              on: aspect.isNotEmpty,
+              enabled: m.aspects.isNotEmpty,
+              onTap: () async {
+                final v = await showImageOptionSheet(
+                  context,
+                  title: context.l10n.aspectLabel,
+                  options: m.aspects,
+                  current: aspect,
+                );
+                if (v != null) await n.patch((x) => x.copyWith(imageAspect: v));
+              },
+            ),
+            const SizedBox(width: 8),
+            _imageOptionChip(
+              icon: Icons.burst_mode_outlined,
+              label: context.l10n.imagesN(s.imageCount),
+              on: s.imageCount > 1,
+              enabled: true,
+              onTap: () async {
+                final v = await showImageOptionSheet(
+                  context,
+                  title: context.l10n.imageCount,
+                  options: [for (var i = 1; i <= kMaxImageCount; i++) '$i'],
+                  current: '${s.imageCount}',
+                  auto: false,
+                  labelOf: (v) => context.l10n.imagesN(int.parse(v)),
+                );
+                if (v != null) {
+                  await n.patch((x) => x.copyWith(imageCount: int.parse(v)));
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _imageOptionChip({
+    required IconData icon,
+    required String label,
+    required bool on,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    final muted = context.scheme.outline;
+    return FilterChip(
+      selected: on,
+      showCheckmark: false,
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      avatar: Icon(
+        icon,
+        size: 16,
+        color: enabled ? context.chipIcon(on) : muted,
+      ),
+      label: Text(label, style: enabled ? null : TextStyle(color: muted)),
+      onSelected: (_) => enabled
+          ? onTap()
+          : hintSnack(context, context.l10n.modelUnsupported, icon: icon),
     );
   }
 
@@ -577,7 +826,6 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
   /// 预设没写的模式照常列在弹层里,选了说一句为什么,和画布空着时的「引用创作页」
   /// 一个道理。
   Widget _modeChip(
-    bool running,
     RulesFamily family, {
     required AssistantMode shown,
     required bool Function(AssistantMode) usable,
@@ -593,10 +841,11 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
         // 关着用 layers,别用 tune —— 顶栏「助手设置」已经是 tune 了
         on ? assistantModeIcon(shown, on: true) : Icons.layers_outlined,
         size: 16,
+        color: context.chipIcon(on),
       ),
       // 开着就只写模式名;关着写「模式」,「模式 无」读着别扭
-      label: Text(on ? assistantModeLabel(shown) : '模式'),
-      onSelected: running ? null : (_) => _pickMode(family, shown, usable),
+      label: Text(on ? assistantModeLabel(shown) : context.l10n.modeLabel),
+      onSelected: (_) => _pickMode(family, shown, usable),
     );
   }
 
@@ -608,18 +857,12 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
     final picked = await showModeSheet(context, current: shown);
     if (picked == null || !mounted) return;
     if (!usable(picked)) {
-      // 手上那份默认规则可能是旧的:后端改了预设、重启过,app 还拿着之前取的那份。
-      // 说「不支持」之前先向服务端要一份最新的,真没有才说
-      final latest = await refreshAssistantModes(ref, family);
-      if (!mounted) return;
-      if (!latest.contains(picked)) {
-        hintSnack(
-          context,
-          '当前规则预设不支持「${assistantModeLabel(picked)}」',
-          icon: assistantModeIcon(picked),
-        );
-        return;
-      }
+      hintSnack(
+        context,
+        context.l10n.rulesNoMode(assistantModeLabel(picked)),
+        icon: assistantModeIcon(picked),
+      );
+      return;
     }
     // 和存着的比,不和显示的比:显示成「无」可能只是这份预设没写那个模式,
     // 用户这时选「无」是真想换回来
@@ -630,29 +873,46 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
 
   /// 思考等级。点开是一张带滑杆的弹层([showThinkSheet])—— 六档是一条有序的轴,
   /// 循环点击要按五下才回得来,菜单又会让它看起来像六个并列选项。
-  Widget _thinkChip(bool running) {
-    final level =
-        ref.watch(assistantSettingsProvider).value?.thinkLevel ??
-        ThinkLevel.auto;
+  ///
+  /// 当前模型调不了思考深度时置灰、显示生效的「自动」,点了说一句为什么。
+  Widget _thinkChip() {
+    final adjustable = ref.watch(assistantCapabilitiesProvider).thinking;
+    final level = adjustable
+        ? ref.watch(assistantSettingsProvider).value?.thinkLevel ??
+              ThinkLevel.auto
+        : ThinkLevel.auto;
+    final on = level != ThinkLevel.auto;
+    final muted = context.scheme.outline;
     return FilterChip(
       // 「自动」不算开着:那一档压根不发字段
-      selected: level != ThinkLevel.auto,
+      selected: on,
       showCheckmark: false,
       visualDensity: VisualDensity.compact,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
       avatar: Icon(
         level == ThinkLevel.off ? Icons.lightbulb_outline : Icons.lightbulb,
         size: 16,
+        color: adjustable ? context.chipIcon(on) : muted,
       ),
-      label: Text('思考 ${thinkLevelLabel(level)}'),
-      onSelected: running ? null : (_) => showThinkSheet(context),
+      label: Text(
+        context.l10n.thinkChip(thinkLevelLabel(level)),
+        style: adjustable ? null : TextStyle(color: muted),
+      ),
+      onSelected: (_) => adjustable
+          ? showThinkSheet(context)
+          : hintSnack(
+              context,
+              context.l10n.modelUnsupported,
+              icon: Icons.lightbulb_outline,
+            ),
     );
   }
 
   Widget _inputBar(ColorScheme scheme, AssistantState st) {
     final running = st.running;
-    final canSend =
-        !running && (_input.text.trim().isNotEmpty || _pending != null);
+    final pending = ref.watch(draftImagesProvider);
+    final hasDraft = _input.text.trim().isNotEmpty || pending.isNotEmpty;
+    final canSend = hasDraft || (!running && st.queue.isNotEmpty);
     final g = ref.watch(generateProvider);
     final hasCanvas = canvasHasContent(g);
     // 画布清空了(比如去创作页按了重置)就把勾一起撤掉,不留一个带不出东西的勾。
@@ -661,82 +921,100 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
         if (mounted && _withCanvas) setState(() => _withCanvas = false);
       });
     }
-    return Padding(
-      // 键盘避让交给 Scaffold(resizeToAvoidBottomInset 默认开):它已经把 body
-      // 的 viewInsets.bottom 抹成 0 了,这里再加一次等于抬两倍高。
-      padding: const EdgeInsets.fromLTRB(12, 9, 12, 11),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (_pending != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 53, bottom: 9),
-              child: _Thumb(
-                bytes: _pending!.bytes,
-                onRemove: () => setState(() => _pending = null),
-              ),
-            ),
-          _optionRow(running, hasCanvas),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+    // 浮卡样式:白色底部区,和底栏连成一块;输入框是凹槽灰
+    return Docked(
+      child: ColoredBox(
+        color: context.raisedFill(Colors.transparent),
+        child: Padding(
+          // 键盘避让交给 Scaffold(resizeToAvoidBottomInset 默认开):它已经把 body
+          // 的 viewInsets.bottom 抹成 0 了,这里再加一次等于抬两倍高。
+          padding: const EdgeInsets.fromLTRB(12, 9, 12, 11),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              IconButton(
-                tooltip: '带一张图',
-                onPressed: running ? null : _pick,
-                icon: Icon(
-                  Icons.image_outlined,
-                  color: _pending != null ? scheme.primary : null,
-                ),
-              ),
-              const SizedBox(width: 1),
-              Expanded(
-                child: TextField(
-                  controller: _input,
-                  focusNode: _inputFocus,
-                  enabled: !running,
-                  minLines: 1,
-                  maxLines: 5,
-                  textInputAction: TextInputAction.newline,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: running ? '正在想…' : '想画什么、想改哪里…',
-                    filled: true,
-                    fillColor: running
-                        ? scheme.surfaceContainer
-                        : scheme.surfaceContainerLowest,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(22),
-                      borderSide: BorderSide.none,
+              if (pending.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, bottom: 8),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final (i, p) in pending.indexed)
+                          _Thumb(
+                            key: ObjectKey(p),
+                            bytes: p.bytes,
+                            onRemove: () => ref
+                                .read(draftImagesProvider.notifier)
+                                .removeAt(i),
+                          ),
+                      ],
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              // 跑起来之后发送键换成停止 —— 不排队第二句:一轮 20~40 秒,
-              // 攒着发只会让人搞不清哪句对应哪个结果。
-              SizedBox(
-                width: 44,
-                height: 44,
-                child: running
-                    ? IconButton.filledTonal(
-                        tooltip: '停止',
-                        onPressed: ref.read(assistantProvider.notifier).stop,
-                        icon: const Icon(Icons.stop, size: 20),
-                      )
-                    : IconButton.filled(
-                        tooltip: '发送',
-                        onPressed: canSend ? () => _send() : null,
-                        icon: const Icon(Icons.arrow_upward, size: 20),
+              _optionRow(hasCanvas),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  IconButton(
+                    tooltip: context.l10n.attachImage,
+                    onPressed: _pick,
+                    icon: Icon(
+                      Icons.image_outlined,
+                      color: pending.isNotEmpty ? scheme.primary : null,
+                    ),
+                  ),
+                  const SizedBox(width: 1),
+                  Expanded(
+                    child: TextField(
+                      controller: _input,
+                      focusNode: _inputFocus,
+                      minLines: 1,
+                      maxLines: 5,
+                      textInputAction: TextInputAction.newline,
+                      onChanged: (_) => setState(() {}),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: context.l10n.inputHint,
+                        hintMaxLines: 1,
+                        filled: true,
+                        fillColor: context.skin.float
+                            ? scheme.surfaceContainerHigh
+                            : scheme.surfaceContainerLowest,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(22),
+                          borderSide: BorderSide.none,
+                        ),
                       ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // 跑着的时候:输入框空着是停止,写了东西是发送(排进队里)
+                  SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: running && !hasDraft
+                        ? IconButton.filledTonal(
+                            tooltip: context.l10n.stop,
+                            onPressed: ref
+                                .read(assistantProvider.notifier)
+                                .stop,
+                            icon: const Icon(Icons.stop, size: 20),
+                          )
+                        : IconButton.filled(
+                            tooltip: context.l10n.send,
+                            onPressed: canSend ? () => _send() : null,
+                            icon: const Icon(Icons.arrow_upward, size: 20),
+                          ),
+                  ),
+                ],
               ),
             ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -764,7 +1042,7 @@ class _ModelGate extends ConsumerWidget {
               width: 62,
               height: 62,
               decoration: BoxDecoration(
-                color: scheme.surfaceContainer,
+                color: context.raisedFill(scheme.surfaceContainer),
                 shape: BoxShape.circle,
               ),
               child: Icon(
@@ -775,14 +1053,14 @@ class _ModelGate extends ConsumerWidget {
             ),
             const SizedBox(height: 15),
             Text(
-              'AI 助手暂不支持这个模型',
+              context.l10n.assistantModelUnsupported,
               style: context.texts.titleSmall!.copyWith(
                 fontWeight: FontWeight.w700,
               ),
             ),
             const SizedBox(height: 10),
             Text(
-              'Anima 与 Krea 的提示词体系和 NAI 是两套。\n去创作页换成 NAI 4.5 或 5 再来。',
+              context.l10n.assistantModelUnsupportedBody,
               textAlign: TextAlign.center,
               style: context.texts.bodySmall!.copyWith(
                 color: scheme.onSurfaceVariant,
@@ -793,7 +1071,7 @@ class _ModelGate extends ConsumerWidget {
             FilledButton(
               onPressed: () =>
                   ref.read(shellIndexProvider.notifier).select(kTabCreate),
-              child: const Text('去换模型'),
+              child: Text(context.l10n.goChangeModel),
             ),
           ],
         ),
@@ -830,13 +1108,13 @@ class _BetaBadge extends StatelessWidget {
 }
 
 /// 没有 Bot 授权、也没选自定义接口:这时发不出去。不放一个按下去就报错的空壳输入框,
-/// 给两条出路 —— 选一个自己的模型接口,或者去做 Bot 授权。
+/// 给条出路 —— 选一个自己的模型接口。
 /// tab 常驻(不按登录态藏),门槛写在页里 —— tab 时有时无更迷惑。
-class _Gate extends ConsumerWidget {
+class _Gate extends StatelessWidget {
   const _Gate({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final scheme = context.scheme;
     return Center(
       child: Padding(
@@ -848,21 +1126,21 @@ class _Gate extends ConsumerWidget {
               width: 62,
               height: 62,
               decoration: BoxDecoration(
-                color: scheme.surfaceContainer,
+                color: context.raisedFill(scheme.surfaceContainer),
                 shape: BoxShape.circle,
               ),
               child: Icon(Icons.bolt_outlined, size: 26, color: scheme.outline),
             ),
             const SizedBox(height: 15),
             Text(
-              '先选一个模型接口',
+              context.l10n.pickEndpointFirst,
               style: context.texts.titleSmall!.copyWith(
                 fontWeight: FontWeight.w700,
               ),
             ),
             const SizedBox(height: 10),
             Text(
-              '没有 Bot 授权时,AI 助手只能用你自己的模型接口,\n资料只用本地库。',
+              context.l10n.builtinUnavailableBody,
               textAlign: TextAlign.center,
               style: context.texts.bodySmall!.copyWith(
                 color: scheme.onSurfaceVariant,
@@ -872,13 +1150,7 @@ class _Gate extends ConsumerWidget {
             const SizedBox(height: 18),
             FilledButton(
               onPressed: () => showModelSheet(context),
-              child: const Text('选择模型接口'),
-            ),
-            const SizedBox(height: 4),
-            TextButton(
-              onPressed: () =>
-                  ref.read(shellIndexProvider.notifier).select(kTabProfile),
-              child: const Text('去 Bot 授权'),
+              child: Text(context.l10n.selectEndpoint),
             ),
           ],
         ),
@@ -896,9 +1168,17 @@ class _MsgTile extends ConsumerWidget {
     this.live = false,
     this.onRetry,
     this.handoffSecs,
+    this.queued = false,
+    this.queuedImages = const [],
   });
 
   final AssistantMsg msg;
+
+  /// 还排在队里、没发出去的一句:气泡压淡,底下标「排队中」。
+  final bool queued;
+
+  /// 排着那句带的图。还没存进 blob,直接拿字节画。
+  final List<Uint8List> queuedImages;
 
   /// 上一份提议 —— 结果条拿它当差异基线。
   final DrawProposal? prev;
@@ -937,47 +1217,53 @@ class _MsgTile extends ConsumerWidget {
   ) => Column(
     crossAxisAlignment: CrossAxisAlignment.end,
     children: [
-      if (msg.imageHash != null)
+      if (queuedImages.isNotEmpty)
+        _fade(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: _sentImages([
+              for (final b in queuedImages) _sentImage(b, queuedImages.length),
+            ]),
+          ),
+        )
+      else if (msg.imageHashes.isNotEmpty)
         Padding(
           padding: const EdgeInsets.only(bottom: 6),
-          child: FutureBuilder(
-            future: ref.read(appStoresProvider).assistant.image(msg.imageHash),
-            builder: (context, snap) => snap.data == null
-                ? const SizedBox.shrink()
-                : ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.memory(
-                      snap.data!,
-                      width: 96,
-                      height: 96,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-          ),
+          child: _sentImages([
+            for (final h in msg.imageHashes)
+              FutureBuilder(
+                future: ref.read(appStoresProvider).assistant.image(h),
+                builder: (context, snap) => snap.data == null
+                    ? const SizedBox.shrink()
+                    : _sentImage(snap.data!, msg.imageHashes.length),
+              ),
+          ]),
         ),
       GestureDetector(
         onLongPress: onLongPress,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.sizeOf(context).width * .8,
-          ),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: scheme.secondaryContainer,
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(16),
-                topRight: Radius.circular(16),
-                bottomLeft: Radius.circular(16),
-                bottomRight: Radius.circular(4),
-              ),
+        child: _fade(
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * .8,
             ),
-            child: Text(
-              msg.text,
-              style: context.texts.bodyMedium!.copyWith(
-                color: scheme.onSecondaryContainer,
-                fontSize: fontSize,
-                height: 1.5,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: context.selectedFill,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(16),
+                  topRight: Radius.circular(16),
+                  bottomLeft: Radius.circular(16),
+                  bottomRight: Radius.circular(4),
+                ),
+              ),
+              child: Text(
+                msg.text,
+                style: context.texts.bodyMedium!.copyWith(
+                  color: context.onSelectedFill,
+                  fontSize: fontSize,
+                  height: 1.5,
+                ),
               ),
             ),
           ),
@@ -985,25 +1271,61 @@ class _MsgTile extends ConsumerWidget {
       ),
       // 这一轮 AI 看没看见画布,事后光读回复分不出来 —— 留个记号,
       // 「它怎么没按我的词改」才有答案。
-      if (msg.withCanvas)
+      if (queued || msg.withCanvas)
         Padding(
           padding: const EdgeInsets.only(top: 4, right: 2),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.draw_outlined, size: 12, color: scheme.outline),
-              const SizedBox(width: 4),
-              Text(
-                '引用了创作页',
-                style: context.texts.labelSmall!.copyWith(
-                  color: scheme.outline,
+              if (queued)
+                ..._mark(context, Icons.schedule, context.l10n.queued),
+              if (queued && msg.withCanvas) const SizedBox(width: 10),
+              if (msg.withCanvas)
+                ..._mark(
+                  context,
+                  Icons.draw_outlined,
+                  context.l10n.quotedCreatePage,
                 ),
-              ),
             ],
           ),
         ),
     ],
   );
+
+  /// 一条消息带的几张图,靠右排,放不下折行。
+  Widget _sentImages(List<Widget> images) => Wrap(
+    alignment: WrapAlignment.end,
+    spacing: 6,
+    runSpacing: 6,
+    children: images,
+  );
+
+  /// 一张图:只有一张时大一些,几张时缩小排成一行。
+  Widget _sentImage(Uint8List bytes, int count) {
+    final side = count > 1 ? 72.0 : 96.0;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Image.memory(bytes, width: side, height: side, fit: BoxFit.cover),
+    );
+  }
+
+  /// 排着的那句压淡;发出去时原地淡回来。
+  Widget _fade(Widget child) => AnimatedOpacity(
+    opacity: queued ? .55 : 1,
+    duration: Motion.medium,
+    curve: Motion.standard,
+    child: child,
+  );
+
+  /// 用户气泡底下那行小记号里的一项。
+  List<Widget> _mark(BuildContext context, IconData icon, String label) {
+    final color = context.scheme.outline;
+    return [
+      Icon(icon, size: 12, color: color),
+      const SizedBox(width: 4),
+      Text(label, style: context.texts.labelSmall!.copyWith(color: color)),
+    ];
+  }
 
   /// AI 那一轮。给了画面的,回复和结果合成一个气泡,底部压一条 [ResultStrip] ——
   /// 每一份都长这样,不给最后一份单独摊一张卡:新一轮一来它就得收起来,同一个东西
@@ -1014,6 +1336,10 @@ class _MsgTile extends ConsumerWidget {
   /// 「纯文本格式」那一轮([AssistantMsg.promptAsText])不出结果条:提示词接在正文下面,
   /// 显示成纯文本,点一下复制。
   Widget _ai(BuildContext context, ColorScheme scheme) {
+    // 图像模型出的那轮没有正文,只有图
+    if (msg.imageGen != null && msg.text.trim().isEmpty) {
+      return InlineImages(msg: msg);
+    }
     final asText = msg.promptAsText;
     final strip = msg.draw != null && !asText;
     final maxW = MediaQuery.sizeOf(context).width * .84;
@@ -1033,6 +1359,7 @@ class _MsgTile extends ConsumerWidget {
               decoration: BoxDecoration(
                 color: scheme.surfaceContainerLow,
                 borderRadius: _kAiBubbleRadius,
+                border: context.edgeBorder,
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1093,17 +1420,19 @@ class _MsgTile extends ConsumerWidget {
     );
   }
 
-  /// 失败气泡。
+  /// 失败气泡:原始错误内容 + 复制 / 重试。
   Widget _error(BuildContext context, ColorScheme scheme) {
-    final auth = msg.errorKind == AssistErrorKind.auth;
-    final fg = auth ? scheme.onSurfaceVariant : scheme.onErrorContainer;
+    final fg = scheme.onErrorContainer;
     final retry = onRetry;
+    final buttonStyle = TextButton.styleFrom(
+      foregroundColor: fg,
+      visualDensity: VisualDensity.compact,
+    );
     return Container(
-      padding: EdgeInsets.fromLTRB(14, 12, 14, retry == null ? 12 : 4),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
       decoration: BoxDecoration(
-        color: auth ? scheme.surfaceContainerLow : scheme.errorContainer,
+        color: scheme.errorContainer,
         borderRadius: BorderRadius.circular(16),
-        border: auth ? Border.all(color: scheme.outlineVariant) : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1112,11 +1441,7 @@ class _MsgTile extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                auth ? Icons.lock_outline : Icons.error_outline,
-                size: 18,
-                color: auth ? scheme.outline : scheme.onErrorContainer,
-              ),
+              Icon(Icons.error_outline, size: 18, color: fg),
               const SizedBox(width: 9),
               Expanded(
                 child: Text(
@@ -1130,19 +1455,24 @@ class _MsgTile extends ConsumerWidget {
               ),
             ],
           ),
-          if (retry != null)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: retry,
-                icon: const Icon(Icons.refresh, size: 17),
-                label: const Text('重试'),
-                style: TextButton.styleFrom(
-                  foregroundColor: fg,
-                  visualDensity: VisualDensity.compact,
-                ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton.icon(
+                onPressed: () => copyText(context, msg.text),
+                icon: const Icon(Icons.copy_outlined, size: 16),
+                label: Text(context.l10n.copy),
+                style: buttonStyle,
               ),
-            ),
+              if (retry != null)
+                TextButton.icon(
+                  onPressed: retry,
+                  icon: const Icon(Icons.refresh, size: 17),
+                  label: Text(context.l10n.retry),
+                  style: buttonStyle,
+                ),
+            ],
+          ),
         ],
       ),
     );
@@ -1233,7 +1563,7 @@ class _LiveTurn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 从发出那一刻算:这一轮是跟那条提问一起开始的(见 AssistantNotifier.send)
+    // 从发出那一刻算:这一轮是跟那条提问一起开始的(见 AssistantController.send)
     int? since;
     for (final m in state.msgs.reversed) {
       if (m.role == MsgRole.user) {
@@ -1361,6 +1691,7 @@ class _PendingBubbleState extends State<_PendingBubble> {
         decoration: BoxDecoration(
           color: scheme.surfaceContainerLow,
           borderRadius: _kAiBubbleRadius,
+          border: context.edgeBorder,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1464,7 +1795,7 @@ Widget pendingStatusRow(
           children: [...previous, ?current],
         ),
         child: Text(
-          stage.isEmpty ? '思考中' : stage,
+          stage.isEmpty ? l10nNow.thinking : stage,
           key: ValueKey(stage),
           style: style,
         ),
@@ -1472,7 +1803,12 @@ Widget pendingStatusRow(
       if (secs != null) ...[
         const SizedBox(width: 8),
         Text(
-          '$secs 秒',
+          secs < 60
+              ? l10nNow.durSecs(secs)
+              : l10nNow.durMinSecs(
+                  secs ~/ 60,
+                  (secs % 60).toString().padLeft(2, '0'),
+                ),
           style: style.copyWith(
             color: scheme.outline,
             fontFeatures: const [FontFeature.tabularFigures()],
@@ -1526,25 +1862,34 @@ class _HandoffState extends State<_Handoff> {
 }
 
 class _Thumb extends StatelessWidget {
-  const _Thumb({required this.bytes, required this.onRemove});
+  const _Thumb({super.key, required this.bytes, required this.onRemove});
 
   final Uint8List bytes;
   final VoidCallback onRemove;
 
+  // ✕ 压在右上角、上沿多出 6:都留在这个框里,外面的横向滚动会裁掉框外的部分
   @override
   Widget build(BuildContext context) => SizedBox(
     width: 76,
-    height: 76,
+    height: 70,
     child: Stack(
-      clipBehavior: Clip.none,
       children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Image.memory(bytes, width: 64, height: 64, fit: BoxFit.cover),
+        Positioned(
+          left: 0,
+          top: 6,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.memory(
+              bytes,
+              width: 64,
+              height: 64,
+              fit: BoxFit.cover,
+            ),
+          ),
         ),
         Positioned(
-          right: 0,
-          top: -4,
+          right: 1,
+          top: 0,
           child: Material(
             color: context.scheme.inverseSurface,
             shape: const CircleBorder(),

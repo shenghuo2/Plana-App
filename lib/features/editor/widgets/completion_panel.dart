@@ -5,11 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/store/ui_prefs.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../generate/widgets/common.dart' show hintSnack;
-import '../data/completion_source.dart';
 import '../data/suggestions.dart';
 import '../data/tag_completion.dart';
 import '../data/tag_translation_service.dart';
 import 'completion_bar.dart' show CompletionGrip, suggestionGlyph;
+import '../../../l10n/l10n.dart';
 
 /// 形态 B · 展开态:分类竖向列表(键盘收起,腾出纵向空间)。
 /// 由形态 A 上滑 / 点抓手进入;顶部抓手或下滑 / 底部提示 → 收起回形态 A。
@@ -146,11 +146,15 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
     // 理由见那里:上游角色条数多,夹在中间会把 OC 顶到要滚很久才看得到。
     // OC 一节里公共库别人的也在(底行写作者),所以节名不叫「我的 OC」。
     final sections = <(SuggestionKind, String, List<Suggestion>)>[
-      (SuggestionKind.artist, '画师', widget.result.artists),
+      (SuggestionKind.artist, context.l10n.kindArtist, widget.result.artists),
       (SuggestionKind.oc, 'OC', widget.result.ocs),
-      (SuggestionKind.character, '角色', widget.result.characters),
-      (SuggestionKind.work, '作品', widget.result.works),
-      (SuggestionKind.tag, '标签', widget.result.tags),
+      (
+        SuggestionKind.character,
+        context.l10n.characters,
+        widget.result.characters,
+      ),
+      (SuggestionKind.work, context.l10n.kindWork, widget.result.works),
+      (SuggestionKind.tag, context.l10n.kindTag, widget.result.tags),
     ].where((e) => e.$3.isNotEmpty).toList();
 
     final rows = <Widget>[];
@@ -214,7 +218,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
       child: Row(
         children: [
           Text(
-            '补全结果',
+            context.l10n.completionResults,
             style: context.texts.titleSmall!.copyWith(
               fontWeight: FontWeight.w700,
               color: scheme.onSurface,
@@ -222,7 +226,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
           ),
           const SizedBox(width: 7),
           Text(
-            '${widget.result.total} 项',
+            context.l10n.itemsCount(widget.result.total),
             style: context.texts.bodySmall!.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -247,7 +251,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
                     Icon(Icons.swap_vert, size: 16, color: scheme.primary),
                     const SizedBox(width: 3),
                     Text(
-                      _byHeat ? '热度' : 'A–Z',
+                      _byHeat ? context.l10n.byHeat : 'A–Z',
                       style: context.texts.labelLarge!.copyWith(
                         color: scheme.primary,
                         fontWeight: FontWeight.w700,
@@ -319,11 +323,8 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
     final isWork = s.kind == SuggestionKind.work;
     // 眼睛 = Danbooru Wiki 预览。画师串是自建条目、OC 是本地条目,
     // Danbooru 上没有对应词条,给了按钮点开也是空,所以这两类不出。
-    // 离线词库没有 wiki 数据(fetchWiki 第一行就 return null),给了按钮也是死的。
     final canWiki =
-        (s.kind == SuggestionKind.tag || s.kind == SuggestionKind.character) &&
-        ref.watch(effectiveCompletionSourceProvider) ==
-            CompletionSource.enhanced;
+        s.kind == SuggestionKind.tag || s.kind == SuggestionKind.character;
     final subtitle = _subtitle(s);
     final count = isWork ? null : formatCount(s.count);
     final open = _wikiOpen == s.text;
@@ -487,7 +488,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
       body = '';
     } else {
       body = _subtitle(s) ?? '';
-      if (body.isEmpty) body = '没拿到 Wiki 摘要,可再点一次或前往 Danbooru 查看。';
+      if (body.isEmpty) body = context.l10n.wikiMissing;
     }
     final other = wiki?.otherNames ?? const <String>[];
 
@@ -515,7 +516,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
                 ),
                 const SizedBox(width: 10),
                 Text(
-                  '加载 Wiki…',
+                  context.l10n.loadingWiki,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
@@ -536,7 +537,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
             if (other.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(
-                '别名: ${other.take(4).join(' / ')}',
+                context.l10n.aliases(other.take(4).join(' / ')),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: context.texts.labelSmall!.copyWith(
@@ -572,6 +573,6 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
   void _openWiki(Suggestion s) {
     final url = danbooruWikiUrl(s.text);
     Clipboard.setData(ClipboardData(text: url));
-    hintSnack(context, '已复制 Wiki 链接:$url', icon: Icons.check);
+    hintSnack(context, context.l10n.wikiLinkCopied(url), icon: Icons.check);
   }
 }

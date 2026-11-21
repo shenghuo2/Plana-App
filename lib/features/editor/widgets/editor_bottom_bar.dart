@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/editor_theme.dart';
 import '../../../core/util/haptics.dart';
-import '../../generate/widgets/common.dart' show hintSnack;
+import '../../generate/widgets/common.dart' show hintSnack, measureText;
 import '../data/tag_favorites.dart';
 import '../editor_state.dart';
 import 'tag_panel.dart' show TagAddChip;
+import '../../../l10n/l10n.dart';
 
 /// 底栏控件的统一高度:正/负滑块、展开钮、右侧操作胶囊共用一个数。
 /// 高度钉死,系统字号放大时各控件不会各长各的。
@@ -45,9 +47,9 @@ class EditorBottomBar extends ConsumerWidget {
     if (at < 0) return;
     hintSnack(
       context,
-      '已取消收藏「$tag」',
+      context.l10n.unfavorited(tag),
       icon: Icons.star_outline_rounded,
-      actionLabel: '撤销',
+      actionLabel: context.l10n.undo,
       onAction: () => favs.restore(tag, at),
     );
   }
@@ -59,111 +61,123 @@ class EditorBottomBar extends ConsumerWidget {
     final notifier = ref.read(editorProvider.notifier);
     final favs = ref.watch(tagFavoritesProvider);
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // 托盘:贴顶对齐 + 裁切,展开时从底栏后面升上来
-        ClipRect(
-          child: AnimatedAlign(
-            duration: Motion.fast,
-            curve: Motion.standard,
-            alignment: Alignment.topCenter,
-            heightFactor: trayOpen ? 1 : 0,
-            child: Material(
-              color: context.editorDock,
-              shape: Border(top: BorderSide(color: context.editorDockLine)),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                // 卡片高度同词条栏的关联标签;空着也占这一行,收第一枚时不跳
-                child: SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: favs.isEmpty
-                      ? Center(
-                          child: Text(
-                            '暂无收藏',
-                            style: context.texts.labelMedium!.copyWith(
-                              color: scheme.outline,
+    // 浮卡样式:托盘和底栏同为卡片白,顶边描发丝边
+    return Docked(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 托盘:贴顶对齐 + 裁切,展开时从底栏后面升上来
+          ClipRect(
+            child: AnimatedAlign(
+              duration: Motion.fast,
+              curve: Motion.standard,
+              alignment: Alignment.topCenter,
+              heightFactor: trayOpen ? 1 : 0,
+              child: Material(
+                color: context.editorDock,
+                shape: Border(top: BorderSide(color: context.editorDockLine)),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  // 卡片高度同词条栏的关联标签;空着也占这一行,收第一枚时不跳
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: favs.isEmpty
+                        ? Center(
+                            child: Text(
+                              context.l10n.noFavorites,
+                              style: context.texts.labelMedium!.copyWith(
+                                color: scheme.outline,
+                              ),
+                            ),
+                          )
+                        : ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            itemCount: favs.length,
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(width: 8),
+                            itemBuilder: (context, i) => TagAddChip(
+                              tag: favs[i],
+                              onTap: () => onInsertFavorite(favs[i]),
+                              onLongPress: () =>
+                                  _removeFavorite(context, ref, favs[i]),
                             ),
                           ),
-                        )
-                      : ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          itemCount: favs.length,
-                          separatorBuilder: (_, _) => const SizedBox(width: 8),
-                          itemBuilder: (context, i) => TagAddChip(
-                            tag: favs[i],
-                            onTap: () => onInsertFavorite(favs[i]),
-                            onLongPress: () =>
-                                _removeFavorite(context, ref, favs[i]),
-                          ),
-                        ),
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-        Material(
-          color: scheme.surface,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _PosNegToggle(
-                    positive: st.activePositive,
-                    onChanged: notifier.setActivePositive,
-                  ),
+          Material(
+            color: context.raisedFill(scheme.surface),
+            child: SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
                 ),
-                const SizedBox(width: 12),
-                _TrayButton(open: trayOpen, onTap: onToggleTray),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Material(
-                    color: scheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(_kBarH / 2),
-                    clipBehavior: Clip.antiAlias,
-                    child: SizedBox(
-                      height: _kBarH,
-                      child: Row(
-                        children: [
-                          // 文案/图标报的是**切过去**的那一头(和 web 那颗
-                          // Grid/AlignLeft 同款语义),所以不做选中高亮 ——
-                          // 高亮加文案会互相打架。
-                          Expanded(
-                            child: _GroupAction(
-                              icon: chipMode
-                                  ? Icons.notes_rounded
-                                  : Icons.grid_view_rounded,
-                              label: chipMode ? '文本' : '芯片',
-                              enabled: true,
-                              onTap: onToggleMode,
-                            ),
-                          ),
-                          SizedBox(
-                            width: 1,
-                            height: 16,
-                            child: ColoredBox(color: scheme.outlineVariant),
-                          ),
-                          Expanded(
-                            child: _GroupAction(
-                              icon: Icons.undo,
-                              label: '撤销',
-                              enabled: st.canUndo,
-                              onTap: notifier.undo,
-                            ),
-                          ),
-                        ],
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _PosNegToggle(
+                        positive: st.activePositive,
+                        onChanged: notifier.setActivePositive,
                       ),
                     ),
-                  ),
+                    const SizedBox(width: 12),
+                    _TrayButton(open: trayOpen, onTap: onToggleTray),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Material(
+                        color: scheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(_kBarH / 2),
+                        clipBehavior: Clip.antiAlias,
+                        child: SizedBox(
+                          height: _kBarH,
+                          child: Row(
+                            children: [
+                              // 文案/图标报的是**切过去**的那一头(和 web 那颗
+                              // Grid/AlignLeft 同款语义),所以不做选中高亮 ——
+                              // 高亮加文案会互相打架。
+                              Expanded(
+                                child: _GroupAction(
+                                  icon: chipMode
+                                      ? Icons.notes_rounded
+                                      : Icons.grid_view_rounded,
+                                  label: chipMode
+                                      ? context.l10n.modeText
+                                      : context.l10n.modeChips,
+                                  enabled: true,
+                                  onTap: onToggleMode,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 1,
+                                height: 16,
+                                child: ColoredBox(color: scheme.outlineVariant),
+                              ),
+                              Expanded(
+                                child: _GroupAction(
+                                  icon: Icons.undo,
+                                  label: context.l10n.undo,
+                                  enabled: st.canUndo,
+                                  onTap: notifier.undo,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -179,11 +193,9 @@ class _TrayButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     return Tooltip(
-      message: open ? '收起' : '展开',
+      message: open ? context.l10n.collapse : context.l10n.expand,
       child: Material(
-        color: open
-            ? scheme.secondaryContainer
-            : scheme.surfaceContainerHighest,
+        color: open ? context.selectedFill : scheme.surfaceContainerHighest,
         shape: const CircleBorder(),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -197,7 +209,7 @@ class _TrayButton extends StatelessWidget {
               child: Icon(
                 Icons.add_rounded,
                 size: 22,
-                color: open ? scheme.onSecondaryContainer : scheme.onSurface,
+                color: open ? context.onSelectedFill : scheme.onSurface,
               ),
             ),
           ),
@@ -273,6 +285,28 @@ class _PosNegToggle extends StatelessWidget {
     final thumbColor = positive ? scheme.primary : scheme.error;
     final onThumb = positive ? scheme.onPrimary : scheme.onError;
 
+    final l = context.l10n;
+    return LayoutBuilder(
+      builder: (context, c) {
+        // 两段都放得下「图标 + 粗体文案」才带图标
+        final room = (c.maxWidth - 6) / 2 - 8 - 19;
+        const bold = TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700);
+        final icons = [
+          l.positiveShort,
+          l.negativeShort,
+        ].every((t) => measureText(context, t, bold) <= room);
+        return _box(context, thumbColor, onThumb, icons);
+      },
+    );
+  }
+
+  Widget _box(
+    BuildContext context,
+    Color thumbColor,
+    Color onThumb,
+    bool icons,
+  ) {
+    final scheme = context.scheme;
     return Container(
       height: _h,
       padding: const EdgeInsets.all(3),
@@ -304,8 +338,8 @@ class _PosNegToggle extends StatelessWidget {
             children: [
               Expanded(
                 child: _seg(
-                  '正面',
-                  Icons.check,
+                  context.l10n.positiveShort,
+                  icons ? Icons.check : null,
                   active: positive,
                   onThumb: onThumb,
                   onTap: () => onChanged(true),
@@ -313,8 +347,8 @@ class _PosNegToggle extends StatelessWidget {
               ),
               Expanded(
                 child: _seg(
-                  '负面',
-                  Icons.block,
+                  context.l10n.negativeShort,
+                  icons ? Icons.block : null,
                   active: !positive,
                   onThumb: onThumb,
                   onTap: () => onChanged(false),
@@ -329,7 +363,7 @@ class _PosNegToggle extends StatelessWidget {
 
   Widget _seg(
     String label,
-    IconData icon, {
+    IconData? icon, {
     required bool active,
     required Color onThumb,
     required VoidCallback onTap,
@@ -356,7 +390,7 @@ class _SegLabel extends StatelessWidget {
   });
 
   final String label;
-  final IconData icon;
+  final IconData? icon;
   final bool active;
   final Color onThumb;
   final double height;
@@ -369,15 +403,18 @@ class _SegLabel extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: SizedBox(
+      child: Container(
         height: height,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
         child: FittedBox(
           fit: BoxFit.scaleDown,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 14, color: fg),
-              const SizedBox(width: 5),
+              if (icon != null) ...[
+                Icon(icon, size: 14, color: fg),
+                const SizedBox(width: 5),
+              ],
               Text(
                 label,
                 style: TextStyle(

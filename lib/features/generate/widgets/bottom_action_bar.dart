@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/net/anlas_provider.dart';
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/ui/param_input.dart';
 import '../../../core/util/haptics.dart';
@@ -11,13 +12,23 @@ import '../generate_state.dart';
 import '../generation_controller.dart';
 import '../loop_controller.dart';
 import '../models.dart'
-    show GenParams, isNai5MediumModel, kBatchMax, stepsRangeOf;
+    show
+        GenParams,
+        GenProvider,
+        isNai5MediumModel,
+        kBatchMax,
+        kNai5MediumSteps,
+        modelName,
+        providerOfModel,
+        stepsRangeOf;
+import '../nai_request.dart' show effectiveInpaintStrength;
 import '../vibe_encoder.dart';
 import '../../import/import_panel.dart';
 import 'advanced_sheet.dart';
-import 'common.dart' show hintSnack;
+import 'common.dart' show hintSnack, measureText;
 import 'loop_sheet.dart';
 import 'resolution_sheet.dart';
+import '../../../l10n/l10n.dart';
 
 /// 吸底栏上方那一处浮动控件,现在是**谁开着**。
 ///
@@ -124,7 +135,10 @@ class _BottomActionBarState extends ConsumerState<BottomActionBar> {
                 isOpus: isOpus,
                 sendW: sent.params.width,
                 sendH: sent.params.height,
-                strength: job.strength,
+                strength: effectiveInpaintStrength(
+                  sent.params.model,
+                  job.strength,
+                ),
                 v5Charged: v5Charged,
               )
             : estimateCost(sent, isOpus: isOpus, v5Charged: v5Charged)) +
@@ -132,145 +146,185 @@ class _BottomActionBarState extends ConsumerState<BottomActionBar> {
     // 按**会发出去**的那份参数判(见 sentParamsProvider)
     final batchable = sent.params.batchable;
 
-    return Material(
-      color: scheme.surfaceContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 8, 14, 9),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // 两种排法,按有没有「张数」分:
-            //  · anima / krea 四颗 —— 均分。左边挤成一堆的话 Spacer 被压没,
-            //    张数会和「高级」贴在一起;
-            //  · NAI 三颗 —— 还是「左边一串 + 高级钉右边」。三颗均分会把步数
-            //    甩到正中间,中间那片空白比贴在一起更晃眼。
-            Row(
-              mainAxisAlignment: batchable
-                  ? MainAxisAlignment.spaceBetween
-                  : MainAxisAlignment.start,
-              children: [
-                _ReadoutChip(
-                  caption: '尺寸',
-                  value: '${p.width}×${p.height}',
-                  onTap: () => showResolutionSheet(context),
-                ),
-                // Medium 档步数固定,不给调
-                if (!isNai5MediumModel(sent.params.model)) ...[
-                  if (!batchable) const SizedBox(width: 8),
-                  const _StepsChip(),
-                ],
-                // 张数只有 anima / krea 有(NAI 那条路一单一张)。**不给它常驻
-                // 一个位置**:NAI 下摆个恒为 1、点了还得解释「这个模型不支持」
-                // 的读数,只是白占那条本来就挤的行。
-                if (batchable) const _BatchChip() else const Spacer(),
-                _ReadoutChip(
-                  icon: Icons.tune,
-                  value: '高级',
-                  valueMuted: true,
-                  onTap: () => showAdvancedSheet(context),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                // 导入图片:选相册图 → 解析元数据/用作参考的全屏导入面板
-                Tooltip(
-                  message: '导入图片',
-                  child: AnimatedContainer(
-                    duration: Motion.fast,
-                    width: 52,
-                    height: 52,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: scheme.outline.withValues(alpha: .9),
-                        width: 1.5,
+    // 浮卡样式:白底,和底栏连成一块
+    return Docked(
+      child: Material(
+        color: context.raisedFill(scheme.surfaceContainer),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 14, 9),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 两种排法,按有没有「张数」分:
+              //  · anima / krea 四颗 —— 均分。左边挤成一堆的话 Spacer 被压没,
+              //    张数会和「高级」贴在一起;
+              //  · NAI 三颗 —— 还是「左边一串 + 高级钉右边」。三颗均分会把步数
+              //    甩到正中间,中间那片空白比贴在一起更晃眼。
+              LayoutBuilder(
+                builder: (context, cons) {
+                  final l = context.l10n;
+                  final size = '${p.width}×${p.height}';
+                  // 一行放不下时(英文标签长)「高级」只留图标
+                  final need =
+                      _ReadoutChip.widthOf(
+                        context,
+                        caption: l.size,
+                        value: size,
+                      ) +
+                      _ReadoutChip.widthOf(
+                        context,
+                        caption: l.steps,
+                        value: '00',
+                      ) +
+                      (batchable
+                          ? _ReadoutChip.widthOf(
+                                  context,
+                                  caption: l.imageCount,
+                                  value: '0',
+                                ) +
+                                12
+                          : 8) +
+                      _ReadoutChip.widthOf(
+                        context,
+                        icon: Icons.tune,
+                        value: l.advanced,
+                        valueMuted: true,
+                      );
+                  final compact = need > cons.maxWidth;
+                  final advanced = _ReadoutChip(
+                    icon: Icons.tune,
+                    value: compact ? '' : l.advanced,
+                    valueMuted: true,
+                    onTap: () => showAdvancedSheet(context),
+                  );
+                  return Row(
+                    mainAxisAlignment: batchable
+                        ? MainAxisAlignment.spaceBetween
+                        : MainAxisAlignment.start,
+                    children: [
+                      _ReadoutChip(
+                        caption: l.size,
+                        value: size,
+                        onTap: () => showResolutionSheet(context),
                       ),
-                    ),
-                    child: Material(
-                      color: Colors.transparent,
-                      borderRadius: BorderRadius.circular(15),
-                      clipBehavior: Clip.antiAlias,
-                      child: InkWell(
-                        onTap: () => openImportPanel(context),
-                        child: Center(
-                          child: Icon(
-                            Icons.input,
-                            size: 22,
-                            color: scheme.primary,
+                      if (!batchable) const SizedBox(width: 8),
+                      const _StepsChip(),
+                      // 张数只有 anima / krea 有(NAI 那条路一单一张)。**不给它常驻
+                      // 一个位置**:NAI 下摆个恒为 1、点了还得解释「这个模型不支持」
+                      // 的读数,只是白占那条本来就挤的行。
+                      if (batchable) const _BatchChip() else const Spacer(),
+                      if (compact)
+                        Tooltip(message: l.advanced, child: advanced)
+                      else
+                        advanced,
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  // 导入图片:选相册图 → 解析元数据/用作参考的全屏导入面板
+                  Tooltip(
+                    message: context.l10n.importImage,
+                    child: AnimatedContainer(
+                      duration: Motion.fast,
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: scheme.outline.withValues(alpha: .9),
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Material(
+                        color: Colors.transparent,
+                        borderRadius: BorderRadius.circular(15),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: () => openImportPanel(context),
+                          child: Center(
+                            child: Icon(
+                              Icons.input,
+                              size: 22,
+                              color: scheme.primary,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 9),
-                // 循环伴钮:进循环面板(选张数并开始);运行中高亮,面板里可停
-                Tooltip(
-                  message: '循环生成',
-                  child: AnimatedContainer(
-                    duration: Motion.fast,
-                    width: 52,
-                    height: 52,
-                    decoration: BoxDecoration(
-                      color: loop.active
-                          ? scheme.primaryContainer
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
+                  const SizedBox(width: 9),
+                  // 循环伴钮:进循环面板(选张数并开始);运行中高亮,面板里可停
+                  Tooltip(
+                    message: context.l10n.loopGenerate,
+                    child: AnimatedContainer(
+                      duration: Motion.fast,
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
                         color: loop.active
-                            ? scheme.primary
-                            : scheme.outline.withValues(alpha: .9),
-                        width: 1.5,
+                            ? context.solidFill(scheme.primaryContainer)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: loop.active
+                              ? scheme.primary
+                              : scheme.outline.withValues(alpha: .9),
+                          width: 1.5,
+                        ),
                       ),
-                    ),
-                    child: Material(
-                      color: Colors.transparent,
-                      borderRadius: BorderRadius.circular(15),
-                      clipBehavior: Clip.antiAlias,
-                      child: InkWell(
-                        onTap: () => showLoopSheet(context),
-                        child: Center(
-                          child: Icon(
-                            Icons.autorenew,
-                            size: 22,
-                            color: loop.active
-                                ? scheme.onPrimaryContainer
-                                : scheme.primary,
+                      child: Material(
+                        color: Colors.transparent,
+                        borderRadius: BorderRadius.circular(15),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: () => showLoopSheet(context),
+                          child: Center(
+                            child: Icon(
+                              Icons.autorenew,
+                              size: 22,
+                              color: loop.active
+                                  ? context.onSolidFill(
+                                      scheme.onPrimaryContainer,
+                                    )
+                                  : scheme.primary,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 9),
-                // 生成主按钮。**并行之后它一直是「生成」**:再点就是再投一条。
-                // 有任务在跑时按钮**内部**右侧长出一段停止区(带进度环)——
-                // 创作页看不见图库的任务卡,没它就整页看不到进度、也没处取消。
-                Expanded(
-                  child: _GenerateButton(
-                    cost: totalCost,
-                    onGenerate: () {
-                      _hintDisabledVibes(context, ref);
-                      ref.read(generationProvider.notifier).generate();
-                    },
-                    progress: pool.busy ? gen.progress : null,
-                    runningCount: pool.busy ? pool.jobs.length : 0,
-                    stopIcon: loop.active && !loop.stopping
-                        ? Icons.stop_rounded
-                        : Icons.close_rounded,
-                    // 循环:第一次点=软停(本张跑完后停),**再点一次=强制取消**。
-                    // 软停后绝不能变成 null —— 那会在当前张卡住时(断网最常见)
-                    // 关掉唯一的退路,只能干等超时。实测反馈。
-                    onStop: loop.active && !loop.stopping
-                        ? () => ref.read(loopStatusProvider.notifier).stop()
-                        : () => ref.read(generationProvider.notifier).cancel(),
+                  const SizedBox(width: 9),
+                  // 生成主按钮。**并行之后它一直是「生成」**:再点就是再投一条。
+                  // 有任务在跑时按钮**内部**右侧长出一段停止区(带进度环)——
+                  // 创作页看不见图库的任务卡,没它就整页看不到进度、也没处取消。
+                  Expanded(
+                    child: _GenerateButton(
+                      cost: totalCost,
+                      onGenerate: () {
+                        _hintDisabledVibes(context, ref);
+                        ref.read(generationProvider.notifier).generate();
+                      },
+                      progress: pool.busy ? gen.progress : null,
+                      runningCount: pool.busy ? pool.jobs.length : 0,
+                      stopIcon: loop.active && !loop.stopping
+                          ? Icons.stop_rounded
+                          : Icons.close_rounded,
+                      // 循环:第一次点=软停(本张跑完后停),**再点一次=强制取消**。
+                      // 软停后绝不能变成 null —— 那会在当前张卡住时(断网最常见)
+                      // 关掉唯一的退路,只能干等超时。实测反馈。
+                      onStop: loop.active && !loop.stopping
+                          ? () => ref.read(loopStatusProvider.notifier).stop()
+                          : () =>
+                                ref.read(generationProvider.notifier).cancel(),
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -284,7 +338,7 @@ void _hintDisabledVibes(BuildContext context, WidgetRef ref) {
   if (n > 0) {
     hintSnack(
       context,
-      '$n 个 Vibe 缺当前模型编码,已停用',
+      context.l10n.vibesDisabledNoEncoding(n),
       icon: Icons.visibility_off_outlined,
     );
   }
@@ -352,7 +406,7 @@ class _GenerateButton extends StatelessWidget {
                     const SizedBox(width: 8),
                     Flexible(
                       child: Text(
-                        '生成',
+                        context.l10n.generate,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: context.texts.titleMedium!.copyWith(
@@ -392,8 +446,8 @@ class _GenerateButton extends StatelessWidget {
               ),
               Tooltip(
                 message: runningCount > 1
-                    ? '取消当前跟随的这条($runningCount 条在跑)'
-                    : '取消生成',
+                    ? context.l10n.cancelTrackedJob(runningCount)
+                    : context.l10n.cancelGeneration,
                 child: InkWell(
                   onTap: onStop,
                   child: SizedBox(
@@ -559,7 +613,14 @@ class CostPill extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: !paid
-                  ? [Text('免费', maxLines: 1, softWrap: false, style: style)]
+                  ? [
+                      Text(
+                        context.l10n.free,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: style,
+                      ),
+                    ]
                   : [
                       Icon(Icons.toll, size: _icon, color: fg),
                       const SizedBox(width: _gap),
@@ -592,16 +653,28 @@ class _StepsChip extends ConsumerWidget {
     final committed = ref.watch(
       generateProvider.select((s) => s.params.activeSteps),
     );
+    // Medium 档步数固定:读数压灰(同张数锁定),点一下说原因
+    final model = ref.watch(generateProvider.select((s) => s.params.model));
+    final locked = isNai5MediumModel(model);
     final pill = ref.watch(floatingPillProvider);
     final open = pill.isOpen(FloatingPill.steps);
     return _ReadoutChip(
-      caption: '步数',
+      caption: context.l10n.steps,
       value: '${(open ? pill.draft?.round() : null) ?? committed}',
+      valueMuted: locked,
       active: open,
       // 拖动时逐帧换数,再叠淡入淡出只会糊成一团
       animateValue: !open,
-      onTap: () =>
-          ref.read(floatingPillProvider.notifier).toggle(FloatingPill.steps),
+      onTap: () {
+        if (locked) {
+          hintSnack(
+            context,
+            context.l10n.stepsFixed(modelName(model), kNai5MediumSteps),
+          );
+          return;
+        }
+        ref.read(floatingPillProvider.notifier).toggle(FloatingPill.steps);
+      },
     );
   }
 }
@@ -626,7 +699,7 @@ class _BatchChip extends ConsumerWidget {
     // 选 4 出 1 张且没有任何提示,那种不一致最难查。
     final locked = p.effectiveBatch != p.batchCount;
     return _ReadoutChip(
-      caption: '张数',
+      caption: context.l10n.imageCount,
       value: '${p.effectiveBatch}',
       // 锁着时把读数压灰(和「高级」那颗同一种「这不是可调的数」的说法),
       // 不加锁形图标:那会让这一格忽宽忽窄,整行跟着抖。为什么是 1,点一下才说。
@@ -636,8 +709,7 @@ class _BatchChip extends ConsumerWidget {
         if (locked) {
           hintSnack(
             context,
-            '重绘放大开着时只能出 1 张:二段采样要按放大后的尺寸再跑一遍,'
-            '显存吃不下一批。',
+            context.l10n.batchLockedHires,
             icon: Icons.info_outline,
           );
           return;
@@ -718,20 +790,7 @@ class _PillShell extends StatelessWidget {
       child: Container(
         height: 48,
         padding: const EdgeInsets.symmetric(horizontal: 14),
-        decoration: BoxDecoration(
-          color: scheme.surface.withValues(alpha: .85),
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: scheme.outlineVariant.withValues(alpha: .7),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: .14),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
+        decoration: context.floatingPill(24),
         child: Row(
           children: [
             Text(
@@ -756,7 +815,7 @@ class _BatchPickerPill extends ConsumerWidget {
     final scheme = context.scheme;
     final cur = ref.watch(sentParamsProvider).batchCount.clamp(1, kBatchMax);
     return _PillShell(
-      label: '张数',
+      label: context.l10n.imageCount,
       child: Padding(
         padding: const EdgeInsets.only(left: 12),
         child: Container(
@@ -858,8 +917,15 @@ class _StepsSliderPill extends ConsumerWidget {
         (ref.watch(floatingPillProvider.select((x) => x.draft))?.round() ??
                 committed)
             .clamp(min, max);
+    final nai = ref.watch(
+      generateProvider.select(
+        (s) => providerOfModel(s.params.model) == GenProvider.nai,
+      ),
+    );
+    // NAI 离 28 不到一格就吸到 28
+    double snap(double v) => nai && (v - 28).abs() < 1 ? 28 : v.roundToDouble();
     return _PillShell(
-      label: '步数',
+      label: context.l10n.steps,
       child: Row(
         children: [
           Expanded(
@@ -873,15 +939,17 @@ class _StepsSliderPill extends ConsumerWidget {
                   max: max.toDouble(),
                   // 不传 divisions:离散 Slider 会用 75ms 曲线把滑块吸到刻度,
                   // 拖起来黏手。步长(整数)就地取整。
-                  onChanged: (v) => ref
-                      .read(floatingPillProvider.notifier)
-                      .drag(v.roundToDouble()),
+                  onChanged: (v) {
+                    final next = snap(v);
+                    if (nai && next == 28 && steps != 28) Haptics.selection();
+                    ref.read(floatingPillProvider.notifier).drag(next);
+                  },
                   // 松手才写回全局:先提交再清草稿,同一帧生效,不会闪回旧值
                   onChangeEnd: (v) {
                     final p = ref.read(generateProvider).params;
                     ref
                         .read(generateProvider.notifier)
-                        .applyParams(p.withActiveSteps(v.round()));
+                        .applyParams(p.withActiveSteps(snap(v).round()));
                     ref.read(floatingPillProvider.notifier).endDrag();
                   },
                 ),
@@ -899,7 +967,7 @@ class _StepsSliderPill extends ConsumerWidget {
               final p = ref.read(generateProvider).params;
               final v = await showParamInput(
                 context,
-                title: '步数 Steps',
+                title: context.l10n.paramSteps,
                 value: steps.toDouble(),
                 min: min.toDouble(),
                 max: max.toDouble(),
@@ -939,15 +1007,46 @@ class _ReadoutChip extends StatelessWidget {
   final bool animateValue;
   final VoidCallback onTap;
 
+  static const _captionSize = 10.0;
+
+  static TextStyle _valueStyle(BuildContext context, bool muted) => muted
+      ? context.texts.bodyMedium!.copyWith(
+          color: context.scheme.onSurfaceVariant,
+        )
+      : mono(context, size: 13);
+
+  /// 按当前字号排出来有多宽(含内边距与边框)。
+  static double widthOf(
+    BuildContext context, {
+    String? caption,
+    IconData? icon,
+    required String value,
+    bool valueMuted = false,
+  }) {
+    var w = 26.0 + 2;
+    if (icon != null) w += 17 + (value.isEmpty ? 0 : 5);
+    if (caption != null) {
+      w +=
+          measureText(
+            context,
+            caption,
+            const TextStyle(fontSize: _captionSize),
+          ) +
+          5;
+    }
+    if (value.isNotEmpty) {
+      w += measureText(context, value, _valueStyle(context, valueMuted));
+    }
+    return w;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     final text = Text(
       value,
       key: ValueKey(value),
-      style: valueMuted
-          ? context.texts.bodyMedium!.copyWith(color: scheme.onSurfaceVariant)
-          : mono(context, size: 13),
+      style: _valueStyle(context, valueMuted),
     );
     return Material(
       color: scheme.surfaceContainerHighest,
@@ -973,16 +1072,21 @@ class _ReadoutChip extends StatelessWidget {
             children: [
               if (icon != null) ...[
                 Icon(icon, size: 17, color: scheme.onSurfaceVariant),
-                const SizedBox(width: 5),
+                if (value.isNotEmpty) const SizedBox(width: 5),
               ],
               if (caption != null) ...[
                 Text(
                   caption!,
-                  style: TextStyle(fontSize: 10, color: scheme.outline),
+                  style: TextStyle(
+                    fontSize: _captionSize,
+                    color: scheme.outline,
+                  ),
                 ),
                 const SizedBox(width: 5),
               ],
-              if (animateValue)
+              if (value.isEmpty)
+                const SizedBox.shrink()
+              else if (animateValue)
                 AnimatedSwitcher(duration: Motion.fast, child: text)
               else
                 text,

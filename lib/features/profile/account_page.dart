@@ -4,18 +4,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_mode.dart';
 import '../../core/auth/bot_session_store.dart';
 import '../../core/auth/nai_keys.dart';
-import '../../core/net/backend_config.dart';
+import '../../core/net/backend_client.dart';
 import '../../core/net/nai_client.dart';
 import '../../core/net/nai_key_status.dart';
 import '../../core/net/nai_proxy.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
-import '../editor/data/completion_source.dart';
 import '../generate/widgets/common.dart'
     show confirmDialog, hintSnack, sharedAxisRoute;
-import '../onboarding/bot_auth_page.dart';
 import '../stats/stats_providers.dart' show fmtInt;
+import 'api_keys_page.dart';
+import 'bot_auth_panel.dart';
 import 'token_manage_page.dart';
 import '../../core/util/haptics.dart';
+import '../../l10n/l10n.dart';
 
 /// 账号与接入(我的页二级):接入方式切换、Token / Bot 凭据、直连代理、标签补全来源。
 class AccountPage extends ConsumerStatefulWidget {
@@ -26,6 +28,26 @@ class AccountPage extends ConsumerStatefulWidget {
 }
 
 class _AccountPageState extends ConsumerState<AccountPage> {
+  @override
+  void initState() {
+    super.initState();
+    _syncBotExpiry();
+  }
+
+  /// 后端会话随使用滑动续期,进页时取一次最新过期时间写回本地。
+  Future<void> _syncBotExpiry() async {
+    final sid = (await ref.read(botSessionProvider.future))?.sessionId;
+    if (sid == null || !mounted) return;
+    try {
+      final v = await ref.read(backendClientProvider).validate(sid);
+      if (!mounted || !v.valid) return;
+      if (ref.read(botSessionProvider).value?.sessionId != sid) return;
+      await ref
+          .read(botSessionProvider.notifier)
+          .touch(expiresAtMs: v.expiresAtMs, botUserId: v.botUserId);
+    } catch (_) {}
+  }
+
   void _openTokens() =>
       Navigator.of(context).push(sharedAxisRoute(const TokenManagePage()));
 
@@ -37,11 +59,7 @@ class _AccountPageState extends ConsumerState<AccountPage> {
   Future<void> _selectMode(AuthMode m) async {
     if (m == ref.read(authModeProvider).value) return;
     await ref.read(authModeProvider.notifier).set(m);
-    // 不再自动跳授权页:Bot 卡常驻在下方,选了没配也会在卡内直接标红提示。
   }
-
-  void _openBotAuth() =>
-      Navigator.of(context).push(sharedAxisRoute(const BotAuthPage()));
 
   Future<void> _revokeBot() async {
     final ok = await confirmDialog(
@@ -64,11 +82,9 @@ class _AccountPageState extends ConsumerState<AccountPage> {
 
     final mode = ref.watch(authModeProvider).value ?? AuthMode.token;
     final session = ref.watch(botSessionProvider).value;
-    final backendUrl = ref.watch(backendBaseProvider).value ?? '';
-    final compSource = ref.watch(effectiveCompletionSourceProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('账号与接入')),
+      appBar: AppBar(title: Text(context.l10n.accountAccess)),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(14, 8, 14, 24),
         children: [
@@ -92,19 +108,53 @@ class _AccountPageState extends ConsumerState<AccountPage> {
             onChanged: (v) => ref.read(naiProxyProvider.notifier).set(v),
           ),
           const SizedBox(height: 12),
-          _BotCard(
-            session: session,
-            backendUrl: backendUrl,
-            onAuthorize: _openBotAuth,
-            onRevoke: _revokeBot,
-          ),
-          const SizedBox(height: 12),
-          _CompletionCard(
-            source: compSource,
-            onSelect: (s) =>
-                ref.read(completionSourcePrefProvider.notifier).set(s),
-          ),
+          _BotCard(session: session, onRevoke: _revokeBot),
+          // 密钥挂在 Bot 账户上(费用走钱包),没授权就没有可管的
+          if (session != null) ...[
+            const SizedBox(height: 12),
+            _ApiKeysEntry(
+              onTap: () => Navigator.of(
+                context,
+              ).push(sharedAxisRoute(const ApiKeysPage())),
+            ),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+/// API 密钥入口(Bot):用自己的 NovelAI 客户端拿 Bot 账户出图,管理在二级页。
+class _ApiKeysEntry extends StatelessWidget {
+  const _ApiKeysEntry({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: ListTile(
+          onTap: onTap,
+          contentPadding: const EdgeInsets.fromLTRB(16, 2, 12, 2),
+          leading: Icon(Icons.key_outlined, color: scheme.onSurfaceVariant),
+          title: Text(
+            'API 密钥',
+            style: context.texts.bodyMedium!.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          subtitle: Text(
+            '用自己的 NovelAI 客户端出图,费用从钱包扣',
+            style: context.texts.labelSmall!.copyWith(color: scheme.outline),
+          ),
+          trailing: Icon(Icons.chevron_right, color: scheme.outline),
+        ),
       ),
     );
   }
@@ -145,98 +195,104 @@ class _TokenCard extends StatelessWidget {
     ];
     final shown = _quickSwitchSlice(on);
 
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 15, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  'NovelAI Token',
-                  style: context.texts.labelMedium!.copyWith(
-                    color: scheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const Spacer(),
-                _StatusChip(saved: on.isNotEmpty, onLabel: '${on.length} 账号'),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (on.isEmpty)
-              Text(
-                keys.isEmpty
-                    ? '直连生成需要你自己的 NovelAI 令牌,仅加密存储在本机'
-                    : '存了 ${keys.length} 把,但一把都没参与生成',
-                style: context.texts.labelSmall!.copyWith(
-                  color: keys.isEmpty ? scheme.outline : scheme.error,
-                ),
-              )
-            else
-              // 圆钮在这儿也能换主账号 —— 不必为了换个号专门进二级页。
-              // 分组套在整片外面,每块只报自己的 id(同令牌管理页)。
-              RadioGroup<String>(
-                groupValue: naiPrimaryKey(keys)?.id,
-                onChanged: (id) {
-                  if (id != null) onPrimary(id);
-                },
-                child: Column(
-                  children: [
-                    // 一行两块:一块只写名字(或尾号)+ 档位,认得出是谁就够了。
-                    // 更细的读数在二级页,这里挤三块就只剩省略号了。
-                    for (var i = 0; i < shown.length; i += 2)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: _KeyChipTile(
-                                k: shown[i],
-                                onTap: () => onPrimary(shown[i].id),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: i + 1 < shown.length
-                                  ? _KeyChipTile(
-                                      k: shown[i + 1],
-                                      onTap: () => onPrimary(shown[i + 1].id),
-                                    )
-                                  // 奇数个时留空占位,免得最后那块拉成整行宽
-                                  : const SizedBox.shrink(),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            Row(
-              children: [
-                // 左下角是这几个号**加起来**的家底:单个号的读数在二级页,
-                // 这里要回答的是「直连这条路现在总共还剩多少」。
-                Expanded(child: _TotalsLine(keys: on)),
-                const SizedBox(width: 10),
-                OutlinedButton.icon(
-                  onPressed: onManage,
-                  icon: const Icon(Icons.tune, size: 17),
-                  label: const Text('管理令牌'),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(0, 40),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 15, 16, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    'NovelAI Token',
+                    style: context.texts.labelMedium!.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
+                  const Spacer(),
+                  _StatusChip(
+                    saved: on.isNotEmpty,
+                    onLabel: context.l10n.accountsCount(on.length),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (on.isEmpty)
+                Text(
+                  keys.isEmpty
+                      ? context.l10n.tokenNeededHint
+                      : context.l10n.tokensNoneJoined(keys.length),
+                  style: context.texts.labelSmall!.copyWith(
+                    color: keys.isEmpty ? scheme.outline : scheme.error,
+                  ),
+                )
+              else
+                // 圆钮在这儿也能换主账号 —— 不必为了换个号专门进二级页。
+                // 分组套在整片外面,每块只报自己的 id(同令牌管理页)。
+                RadioGroup<String>(
+                  groupValue: naiPrimaryKey(keys)?.id,
+                  onChanged: (id) {
+                    if (id != null) onPrimary(id);
+                  },
+                  child: Column(
+                    children: [
+                      // 一行两块:一块只写名字(或尾号)+ 档位,认得出是谁就够了。
+                      // 更细的读数在二级页,这里挤三块就只剩省略号了。
+                      for (var i = 0; i < shown.length; i += 2)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: _KeyChipTile(
+                                  k: shown[i],
+                                  onTap: () => onPrimary(shown[i].id),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: i + 1 < shown.length
+                                    ? _KeyChipTile(
+                                        k: shown[i + 1],
+                                        onTap: () => onPrimary(shown[i + 1].id),
+                                      )
+                                    // 奇数个时留空占位,免得最后那块拉成整行宽
+                                    : const SizedBox.shrink(),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-              ],
-            ),
-          ],
+              Row(
+                children: [
+                  // 左下角是这几个号**加起来**的家底:单个号的读数在二级页,
+                  // 这里要回答的是「直连这条路现在总共还剩多少」。
+                  Expanded(child: _TotalsLine(keys: on)),
+                  const SizedBox(width: 10),
+                  OutlinedButton.icon(
+                    onPressed: onManage,
+                    icon: const Icon(Icons.tune, size: 17),
+                    label: Text(context.l10n.manageTokens),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -256,26 +312,29 @@ class _ProxyCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: context.scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: SwitchListTile(
-        value: on,
-        onChanged: onChanged,
-        title: Text(
-          '代理访问 NovelAI',
-          style: context.texts.bodyMedium!.copyWith(
-            fontWeight: FontWeight.w600,
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: context.scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: SwitchListTile(
+          value: on,
+          onChanged: onChanged,
+          title: Text(
+            context.l10n.naiProxy,
+            style: context.texts.bodyMedium!.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
           ),
-        ),
-        subtitle: Text(
-          kNaiProxyHint,
-          style: context.texts.labelSmall!.copyWith(
-            color: context.scheme.outline,
+          subtitle: Text(
+            kNaiProxyHint,
+            style: context.texts.labelSmall!.copyWith(
+              color: context.scheme.outline,
+            ),
           ),
+          contentPadding: const EdgeInsets.fromLTRB(16, 2, 10, 2),
         ),
-        contentPadding: const EdgeInsets.fromLTRB(16, 2, 10, 2),
       ),
     );
   }
@@ -334,13 +393,16 @@ class _TotalsLine extends ConsumerWidget {
       }
     }
     if (got == 0) {
-      return Text('查询账户状态…', style: small.copyWith(color: scheme.outline));
+      return Text(
+        context.l10n.queryingAccount,
+        style: small.copyWith(color: scheme.outline),
+      );
     }
     return Text(
       [
         'Anlas ${fmtInt(anlas)}',
         // 额度只有拿得到才写:官方没承诺过这块字段,读不到就干脆不提。
-        if (hasUsage) '额度 ${pct.round()}%',
+        if (hasUsage) context.l10n.quotaPct(pct.round()),
       ].join(' · '),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
@@ -365,12 +427,13 @@ class _KeyChipTile extends ConsumerWidget {
     final scheme = context.scheme;
     final named = k.label.trim().isNotEmpty;
     final tier = ref.watch(naiKeyStatusProvider(naiTargetOf(k))).value;
+    final onSel = context.onSolidFill(scheme.onPrimaryContainer);
     return AnimatedContainer(
       duration: Motion.fast,
       curve: Motion.standard,
       decoration: BoxDecoration(
         color: k.primary
-            ? scheme.primaryContainer
+            ? context.solidFill(scheme.primaryContainer)
             : scheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(11),
         // 描边两态同宽,只变色 —— 变宽度会让两列跟着抖。
@@ -395,6 +458,9 @@ class _KeyChipTile extends ConsumerWidget {
                 IgnorePointer(
                   child: Radio<String>(
                     value: k.id,
+                    fillColor: k.primary && context.skin.float
+                        ? WidgetStatePropertyAll(onSel)
+                        : null,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     visualDensity: VisualDensity.compact,
                   ),
@@ -408,11 +474,12 @@ class _KeyChipTile extends ConsumerWidget {
                     style: named
                         ? context.texts.labelMedium!.copyWith(
                             fontWeight: FontWeight.w600,
-                            color: k.primary ? scheme.onPrimaryContainer : null,
+                            color: k.primary ? onSel : null,
                           )
-                        : mono(context, size: 11.5).copyWith(
-                            color: k.primary ? scheme.onPrimaryContainer : null,
-                          ),
+                        : mono(
+                            context,
+                            size: 11.5,
+                          ).copyWith(color: k.primary ? onSel : null),
                   ),
                 ),
                 // 档位查到了才写:查询中/失败时这块留空,不占位、不闪动。
@@ -422,7 +489,7 @@ class _KeyChipTile extends ConsumerWidget {
                     naiTierName(tier.tier),
                     style: context.texts.labelSmall!.copyWith(
                       color: k.primary
-                          ? scheme.onPrimaryContainer.withValues(alpha: .8)
+                          ? onSel.withValues(alpha: .8)
                           : scheme.outline,
                     ),
                   ),
@@ -437,24 +504,20 @@ class _KeyChipTile extends ConsumerWidget {
 }
 
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({
-    required this.saved,
-    this.onLabel = '已保存',
-    this.offLabel = '未设置',
-  });
+  const _StatusChip({required this.saved, this.onLabel, this.offLabel});
 
   final bool saved;
-  final String onLabel;
-  final String offLabel;
+  final String? onLabel;
+  final String? offLabel;
 
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     final Color bg = saved
-        ? scheme.primaryContainer
+        ? context.solidFill(scheme.primaryContainer)
         : scheme.surfaceContainerHighest;
     final Color fg = saved
-        ? scheme.onPrimaryContainer
+        ? context.onSolidFill(scheme.onPrimaryContainer)
         : scheme.onSurfaceVariant;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -472,7 +535,9 @@ class _StatusChip extends StatelessWidget {
           ),
           const SizedBox(width: 5),
           Text(
-            saved ? onLabel : offLabel,
+            saved
+                ? onLabel ?? context.l10n.statusSaved
+                : offLabel ?? context.l10n.notSet,
             style: context.texts.labelMedium!.copyWith(
               color: fg,
               fontWeight: FontWeight.w600,
@@ -505,135 +570,80 @@ class _RouteCard extends StatelessWidget {
     final scheme = context.scheme;
     // 选中的那条路没配凭据 → 现在根本生成不了,必须说破
     final missing = mode == AuthMode.token ? !tokenReady : !botReady;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '生成方式',
-              style: context.texts.labelMedium!.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w700,
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                context.l10n.genMethod,
+                style: context.texts.labelMedium!.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: SegmentedButton<AuthMode>(
-                segments: const [
-                  ButtonSegment(
-                    value: AuthMode.token,
-                    label: Text('直连 Token'),
-                    icon: Icon(Icons.vpn_key, size: 16),
-                  ),
-                  ButtonSegment(
-                    value: AuthMode.bot,
-                    label: Text('使用 Bot 账户'),
-                    icon: Icon(Icons.smart_toy_outlined, size: 16),
-                  ),
-                ],
-                selected: {mode},
-                onSelectionChanged: (s) => onSelect(s.first),
-                showSelectedIcon: false,
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<AuthMode>(
+                  segments: [
+                    ButtonSegment(
+                      value: AuthMode.token,
+                      label: Text(context.l10n.directToken),
+                      icon: const Icon(Icons.vpn_key, size: 16),
+                    ),
+                    ButtonSegment(
+                      value: AuthMode.bot,
+                      label: Text(context.l10n.useBotAccount),
+                      icon: const Icon(Icons.smart_toy_outlined, size: 16),
+                      enabled: botReady,
+                    ),
+                  ],
+                  selected: {mode},
+                  onSelectionChanged: (s) => onSelect(s.first),
+                  showSelectedIcon: false,
+                ),
               ),
-            ),
-            const SizedBox(height: 10),
-            // 缺凭据的警告直接顶替常驻说明的位置(同一行槽,高度不变)
-            Text(
-              missing
-                  ? (mode == AuthMode.token
-                        ? '尚未保存 Token,当前无法生成'
-                        : '尚未授权 Bot,当前无法生成')
-                  : (mode == AuthMode.token
-                        ? '使用你的 NovelAI 账户生成图片'
-                        : '使用 Bot 账户生成图片,需按月结算费用'),
-              style: context.texts.labelSmall!.copyWith(
-                color: missing ? scheme.error : scheme.outline,
+              const SizedBox(height: 10),
+              // 缺凭据的警告直接顶替常驻说明的位置(同一行槽,高度不变)
+              Text(
+                missing
+                    ? (mode == AuthMode.token
+                          ? context.l10n.tokenMissing
+                          : '尚未授权 Bot,当前无法生成')
+                    : (mode == AuthMode.token
+                          ? context.l10n.useOwnAccount
+                          : '使用 Bot 账户生成图片,费用从钱包扣除'),
+                style: context.texts.labelSmall!.copyWith(
+                  color: missing ? scheme.error : scheme.outline,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// 标签补全来源切换卡:增强(后端)↔ 离线词库。
-/// 两档都不需要 Bot 会话——补全那几个接口是公开的(2026-08-25 起解除门禁)。
-/// 无会话时增强档只是少了画师串 / OC 两个分组,它们读的是私有接口。
-class _CompletionCard extends StatelessWidget {
-  const _CompletionCard({required this.source, required this.onSelect});
-
-  final CompletionSource source;
-  final ValueChanged<CompletionSource> onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = context.scheme;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '标签补全',
-              style: context.texts.labelMedium!.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: SegmentedButton<CompletionSource>(
-                segments: [
-                  // 不再按 Bot 授权置灰:补全那几个接口都是公开的,
-                  // 无会话只是少了画师串/OC 两组(私有数据,fail-soft 返空)。
-                  const ButtonSegment(
-                    value: CompletionSource.enhanced,
-                    label: Text('增强补全'),
-                    icon: Icon(Icons.auto_awesome, size: 16),
-                  ),
-                  const ButtonSegment(
-                    value: CompletionSource.danbooru,
-                    label: Text('离线词库'),
-                    icon: Icon(Icons.storage, size: 16),
-                  ),
-                ],
-                selected: {source},
-                onSelectionChanged: (s) => onSelect(s.first),
-                showSelectedIcon: false,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Bot 授权状态卡:显示会话归属/有效期,提供 重新授权 / 解除授权。
+/// Bot 授权卡:显示会话归属/有效期;卡内直接取码授权([BotAuthPanel]),
+/// 已授权时提供 重新授权 / 解除授权。
 class _BotCard extends StatelessWidget {
-  const _BotCard({
-    required this.session,
-    required this.backendUrl,
-    required this.onAuthorize,
-    required this.onRevoke,
-  });
+  const _BotCard({required this.session, required this.onRevoke});
 
   final BotSession? session;
-  final String backendUrl;
-  final VoidCallback onAuthorize;
   final VoidCallback onRevoke;
+
+  static const _spinner = SizedBox.square(
+    dimension: 18,
+    child: CircularProgressIndicator(strokeWidth: 2),
+  );
 
   static String _fmtExpiry(int? ms) {
     if (ms == null) return '—';
@@ -647,81 +657,91 @@ class _BotCard extends StatelessWidget {
     final scheme = context.scheme;
     final s = session;
     final authorized = s != null;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 15, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  'Bot 授权',
-                  style: context.texts.labelMedium!.copyWith(
-                    color: scheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const Spacer(),
-                _StatusChip(saved: authorized, onLabel: '已授权', offLabel: '未授权'),
-              ],
-            ),
-            const SizedBox(height: 14),
-            if (authorized) ...[
-              _row(context, '账号', s.botUserId ?? '—'),
-              const SizedBox(height: 8),
-              _row(context, '有效期至', _fmtExpiry(s.expiresAtMs)),
-              const SizedBox(height: 8),
-              _row(
-                context,
-                '后端',
-                backendUrl.isEmpty ? '—' : backendUrl,
-                isMono: true,
-              ),
-              const SizedBox(height: 16),
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 15, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               Row(
                 children: [
-                  OutlinedButton.icon(
-                    onPressed: onAuthorize,
-                    icon: const Icon(Icons.refresh, size: 18),
-                    label: const Text('重新授权'),
+                  Text(
+                    'Bot 授权',
+                    style: context.texts.labelMedium!.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                   const Spacer(),
-                  TextButton.icon(
-                    onPressed: onRevoke,
-                    icon: Icon(Icons.link_off, size: 18, color: scheme.error),
-                    label: Text('解除授权', style: TextStyle(color: scheme.error)),
+                  _StatusChip(
+                    saved: authorized,
+                    onLabel: '已授权',
+                    offLabel: '未授权',
                   ),
                 ],
               ),
-            ] else ...[
-              FilledButton.icon(
-                onPressed: onAuthorize,
-                icon: const Icon(Icons.smart_toy_outlined, size: 18),
-                label: const Text('去授权'),
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size.fromHeight(46),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(23),
-                  ),
-                ),
+              const SizedBox(height: 14),
+              if (authorized) ...[
+                _row(context, '账号', s.botUserId ?? '—'),
+                const SizedBox(height: 8),
+                _row(context, '有效期至', _fmtExpiry(s.expiresAtMs)),
+                const SizedBox(height: 16),
+              ],
+              // 固定在末位并带 key:授权成功切到已授权布局时,面板状态不丢
+              BotAuthPanel(
+                key: const ValueKey('bot-auth'),
+                idleBuilder: (start, loading) => authorized
+                    ? Row(
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: start,
+                            icon: loading
+                                ? _spinner
+                                : const Icon(Icons.refresh, size: 18),
+                            label: const Text('重新授权'),
+                          ),
+                          const Spacer(),
+                          TextButton.icon(
+                            onPressed: onRevoke,
+                            icon: Icon(
+                              Icons.link_off,
+                              size: 18,
+                              color: scheme.error,
+                            ),
+                            label: Text(
+                              '解除授权',
+                              style: TextStyle(color: scheme.error),
+                            ),
+                          ),
+                        ],
+                      )
+                    : FilledButton.icon(
+                        onPressed: start,
+                        icon: loading
+                            ? _spinner
+                            : const Icon(Icons.smart_toy_outlined, size: 18),
+                        label: const Text('获取授权码'),
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size.fromHeight(46),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(23),
+                          ),
+                        ),
+                      ),
               ),
             ],
-          ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _row(
-    BuildContext context,
-    String label,
-    String value, {
-    bool isMono = false,
-  }) {
+  Widget _row(BuildContext context, String label, String value) {
     final scheme = context.scheme;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -738,11 +758,9 @@ class _BotCard extends StatelessWidget {
         Expanded(
           child: Text(
             value,
-            style: isMono
-                ? mono(context, size: 13)
-                : context.texts.bodyMedium!.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+            style: context.texts.bodyMedium!.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       ],

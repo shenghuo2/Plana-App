@@ -6,20 +6,20 @@ import '../../core/auth/auth_mode.dart';
 import '../../core/auth/bot_session_store.dart';
 import '../../core/net/backend_client.dart';
 import '../../core/store/app_stores.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
-import '../generate/gpu_rental.dart' show fmtYuan;
 import '../generate/widgets/common.dart' show sharedAxisRoute;
 import 'day_detail_page.dart';
-import 'gpu_bills_page.dart';
 import 'key_ledger.dart';
-import 'ledger_page.dart';
 import 'platform_page.dart';
 import 'stats_providers.dart';
 import 'stats_widgets.dart';
+import 'wallet_page.dart';
+import '../../l10n/l10n.dart';
 
 /// 统计主页:右上角下拉切数据源(Bot 服务端 / 直连 Key 本机),
 /// 主体是纯数据——时间范围 + hero 大数字 + 随范围变化的可点趋势图
-/// + 六格指标;账单与全平台统计各自二级页。
+/// + 六格指标;钱包与全平台统计各自二级页(都只在 Bot 下列出)。
 class StatsPage extends ConsumerStatefulWidget {
   const StatsPage({super.key});
 
@@ -64,7 +64,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('统计'),
+        title: Text(context.l10n.stats),
         actions: [
           _ModePill(
             bot: _bot,
@@ -85,21 +85,15 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           ];
 
           if (_bot && session == null) {
-            children.add(
-              const StatsCard(
-                child: Text('尚未 Bot 授权。在「我的 → 账号与接入」完成授权后,可查看服务端统计与账单。'),
-              ),
-            );
+            children.add(StatsCard(child: Text(context.l10n.notAvailableYet)));
           } else {
             children.addAll(_dataSection(context));
           }
-          // 账单(服务端计费)与全平台大盘都只对 Bot 有意义,Key 模式不列
+          // 钱包(服务端计费)与全平台大盘都只对 Bot 有意义,Key 模式不列
           if (_bot) {
             if (session != null) {
               children.add(const SizedBox(height: 12));
-              children.add(_billingEntry(context));
-              children.add(const SizedBox(height: 10));
-              children.add(_gpuBillsEntry(context));
+              children.add(_walletEntry(context));
             }
             children.add(const SizedBox(height: 10));
             children.add(_platformEntry(context));
@@ -110,9 +104,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
               ref.invalidate(userStatsProvider);
               ref.invalidate(userStatsAllProvider);
               ref.invalidate(userDailyProvider);
-              ref.invalidate(billingEstimateProvider);
-              ref.invalidate(billingSettlementProvider);
-              ref.invalidate(gpuBillsProvider);
+              ref.invalidate(walletSummaryProvider);
               ref.invalidate(platformHourlyProvider);
             },
             child: ListView(
@@ -178,7 +170,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '张 · $scope生图',
+              context.l10n.imagesScopeSuffix(scope),
               style: context.texts.bodyMedium!.copyWith(
                 color: picked != null
                     ? scheme.primary
@@ -192,12 +184,12 @@ class _StatsPageState extends ConsumerState<StatsPage> {
         padding: const EdgeInsets.only(top: 2),
         child: loading && pts == null
             ? SkeletonText(
-                sample: '消耗 0,000 点',
+                sample: context.l10n.costPts('0,000'),
                 style: context.texts.labelSmall!,
                 width: 76,
               )
             : Text(
-                '消耗 ${pts == null ? '—' : fmtInt(pts)} 点',
+                context.l10n.costPts(pts == null ? '—' : fmtInt(pts)),
                 style: context.texts.labelSmall!.copyWith(
                   color: scheme.outline,
                 ),
@@ -235,7 +227,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
       Padding(
         padding: const EdgeInsets.only(top: 2),
         child: Text(
-          picked == null ? '' : '已选 ${picked.full}',
+          picked == null ? '' : context.l10n.selectedLabel(picked.full),
           style: context.texts.labelSmall!.copyWith(color: scheme.primary),
         ),
       ),
@@ -257,7 +249,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
   ) {
     final scheme = context.scheme;
     final today = _range == 'today';
-    final unit = today ? '时段' : '单日';
+    final peakLabel = today ? context.l10n.peakSlot : context.l10n.peakDay;
 
     // 选中某柱:第一行两个读数,第二行两个当日明细入口
     if (picked != null) {
@@ -284,13 +276,17 @@ class _StatsPageState extends ConsumerState<StatsPage> {
             children: [
               Expanded(
                 child: () {
-                  final n = _billedCount(picked);
+                  final (:n, :loading) = _billedCount(picked);
                   return _DetailEntry(
-                    icon: Icons.toll_outlined,
-                    label: '点数详情',
+                    icon: _bot
+                        ? Icons.account_balance_wallet_outlined
+                        : Icons.toll_outlined,
+                    label: _bot
+                        ? DayDetailMode.points.botTitle
+                        : DayDetailMode.points.title,
                     value: n == null ? null : fmtInt(n),
-                    unit: '笔',
-                    loading: _bot && n == null,
+                    unit: context.l10n.unitTxns,
+                    loading: loading,
                     onTap: () => _openDay(picked, DayDetailMode.points),
                   );
                 }(),
@@ -298,9 +294,9 @@ class _StatsPageState extends ConsumerState<StatsPage> {
               Expanded(
                 child: _DetailEntry(
                   icon: Icons.photo_library_outlined,
-                  label: '生成详情',
+                  label: context.l10n.genDetails,
                   value: fmtInt(picked.images),
-                  unit: '张',
+                  unit: context.l10n.unitImages,
                   onTap: () => _openDay(picked, DayDetailMode.gens),
                 ),
               ),
@@ -337,21 +333,21 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           ),
           StatTile(
             icon: Icons.calendar_today_outlined,
-            label: today ? '活跃时段' : '活跃天数',
+            label: today ? context.l10n.activeSlots : context.l10n.activeDays,
             value: series.isEmpty ? null : '$active',
             suffix: series.isEmpty ? null : '/ ${series.length}',
             loading: seriesLoading,
           ),
           StatTile(
             icon: Icons.trending_up,
-            label: '最高$unit',
+            label: peakLabel,
             value: peakOk ? fmtInt(peak.images) : null,
             suffix: peakOk ? peak.full : null,
             loading: seriesLoading,
           ),
           StatTile(
             icon: Icons.equalizer,
-            label: today ? '段均生图' : '日均生图',
+            label: today ? context.l10n.avgPerSlot : context.l10n.avgPerDay,
             value: avg ?? (seriesLoading ? null : '0'),
             loading: seriesLoading,
           ),
@@ -359,13 +355,13 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           // 看不出真实消耗。没用过 V5 就是两个 0 —— 指标格本来就该摆满。
           StatTile(
             icon: Icons.auto_awesome_outlined,
-            label: 'V5 生图',
+            label: context.l10n.v5Gens,
             value: st == null ? null : fmtInt(st.v5Calls),
             loading: stAsync.isLoading,
           ),
           StatTile(
             icon: Icons.toll,
-            label: 'V5 点数',
+            label: context.l10n.v5Anlas,
             value: st == null ? null : fmtInt(st.v5Points),
             loading: stAsync.isLoading,
           ),
@@ -376,33 +372,37 @@ class _StatsPageState extends ConsumerState<StatsPage> {
         tiles = [
           StatTile(
             icon: Icons.toll_outlined,
-            label: '估算消耗',
+            label: context.l10n.estimatedSpend,
             value: fmtInt(sum.genPts + sum.vibePts + sum.upsPts),
           ),
           StatTile(
             icon: Icons.calendar_today_outlined,
-            label: today ? '活跃时段' : '活跃天数',
+            label: today ? context.l10n.activeSlots : context.l10n.activeDays,
             value: '$active',
             suffix: '/ ${series.length}',
           ),
           StatTile(
             icon: Icons.trending_up,
-            label: '最高$unit',
+            label: peakLabel,
             value: peakOk ? fmtInt(peak.images) : null,
             suffix: peakOk ? peak.full : null,
           ),
           StatTile(
             icon: Icons.equalizer,
-            label: today ? '段均生图' : '日均生图',
+            label: today ? context.l10n.avgPerSlot : context.l10n.avgPerDay,
             value: avg ?? '0',
           ),
           // 与 Bot 同口径,数据源换成本机账本(见 KeyDayAgg.v5)
           StatTile(
             icon: Icons.auto_awesome_outlined,
-            label: 'V5 生图',
+            label: context.l10n.v5Gens,
             value: fmtInt(sum.v5),
           ),
-          StatTile(icon: Icons.toll, label: 'V5 点数', value: fmtInt(sum.v5Pts)),
+          StatTile(
+            icon: Icons.toll,
+            label: context.l10n.v5Anlas,
+            value: fmtInt(sum.v5Pts),
+          ),
         ];
       }
     }
@@ -447,26 +447,35 @@ class _StatsPageState extends ConsumerState<StatsPage> {
         icon: delta == null || delta == 0
             ? Icons.remove
             : (delta > 0 ? Icons.north_east : Icons.south_east),
-        label: _range == 'today' ? '较上一时段' : '较上一日',
+        label: _range == 'today'
+            ? context.l10n.vsPrevSlot
+            : context.l10n.vsPrevDay,
         value: delta == null
             ? '—'
-            : (delta == 0 ? '持平' : '${delta > 0 ? '+' : ''}${fmtInt(delta)}'),
-        suffix: delta == null || delta == 0 ? null : '张',
+            : (delta == 0
+                  ? context.l10n.unchanged
+                  : '${delta > 0 ? '+' : ''}${fmtInt(delta)}'),
+        suffix: delta == null || delta == 0 ? null : context.l10n.unitImages,
       ),
     ];
   }
 
-  /// 该格计费笔数:Key 数本机(计费生成 + 单笔操作);
-  /// Bot 取服务端当日逐笔(与详情页同一 provider,进页时命中缓存)。
-  /// 拉取中返回 null → 入口数值位显示骨架。
-  int? _billedCount(TrendPoint p) {
+  /// 该格笔数:Key 数本机(计费生成 + 单笔操作);
+  /// Bot 数当天的钱包流水(与详情页同一 provider,进页时命中缓存)。
+  /// 拉取中 loading 为真 → 入口数值位显示骨架;拉不到 n 为 null → 「—」。
+  ({int? n, bool loading}) _billedCount(TrendPoint p) {
     if (!_bot) {
       final ledger = ref.read(appStoresProvider).ledger;
       final key = KeyLedgerStore.dayKey(_dayOf(p));
-      return ledger.gensForDay(key).where((g) => g.pts > 0).length +
-          ledger.opsForDay(key).length;
+      return (
+        n:
+            ledger.gensForDay(key).where((g) => g.pts > 0).length +
+            ledger.opsForDay(key).length,
+        loading: false,
+      );
     }
-    return ref.watch(dayDetailsProvider(_dayOf(p))).value?.records.length;
+    final day = ref.watch(dayDetailsProvider(_dayOf(p)));
+    return (n: day.value?.items.length, loading: day.isLoading);
   }
 
   /// 选中格归属的日期(今日档整天;其余按 `MM-dd` 配当前年份还原)。
@@ -485,7 +494,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
       DayDetailPage(
         bot: _bot,
         day: _dayOf(picked),
-        label: _range == 'today' ? '今天' : picked.full,
+        label: _range == 'today' ? context.l10n.today : picked.full,
         mode: mode,
       ),
     );
@@ -515,7 +524,10 @@ class _StatsPageState extends ConsumerState<StatsPage> {
             final end = (h + 3) % 24;
             return TrendPoint(
               label: '$h',
-              full: '今天 $k–${end.toString().padLeft(2, '0')}:00',
+              full: l10nNow.todayRange(
+                k,
+                '${end.toString().padLeft(2, '0')}:00',
+              ),
               images: d?.imageCalls ?? 0,
               pts: d?.pointsSpent ?? 0,
             );
@@ -551,82 +563,49 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     ];
   }
 
-  /// NAI 账单入口。Key 模式下它就是本机账本,标题不带「NAI」——
-  /// 那边压根没有服务端计费,更没有算力账单可对照。
-  Widget _billingEntry(BuildContext context) {
-    final scheme = context.scheme;
-    final String sub;
-    var loading = false;
-    if (_bot) {
-      final estAsync = ref.watch(billingEstimateProvider);
-      final est = estAsync.value;
-      final settle = ref.watch(billingSettlementProvider).value;
-      loading = estAsync.isLoading;
-      // 结算日跟着周期标签走,不写死 —— 那个分界日改过一次(27 → 23)
-      sub = est?.me == null
-          ? '按月阶梯分摊 · 每日流水'
-          : '本期预估 ¥${fmtFee(est!.me!.totalFee)} · ${est.cycleDay} 日结算'
-                '${settle?.paymentStatus == 'unpaid' ? ' · 上期待支付' : ''}';
-    } else {
-      final sum = ref.read(appStoresProvider).ledger.sumRange(_range);
-      sub =
-          '本机记录 · ${rangeLabels[_range]} '
-          '${fmtInt(sum.genPts + sum.vibePts + sum.upsPts)} 点';
-    }
-    return _EntryCard(
-      icon: Icons.receipt_long_outlined,
-      title: _bot ? 'NAI 账单' : '账单',
-      subWidget: loading
-          ? SkeletonText(
-              sample: '本期预估 ¥000 · 00 日结算',
-              style: context.texts.labelSmall!,
-              width: 132,
-            )
-          : Text(
-              sub,
-              style: context.texts.labelSmall!.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-      onTap: () => _push(LedgerPage(bot: _bot, range: _range)),
-    );
-  }
-
-  /// 算力账单入口(租卡 + 视频)。
+  /// 钱包入口(Bot)。
   ///
-  /// **和 NAI 那本分开列,不并成一页求和**:那本是订阅制月盘子按用量分摊
-  /// (阶梯、月结、有支付状态),这本是按次实付、直计不分摊。两个数加起来
-  /// 没有任何含义,摆在一张卡里只会让人以为能相加。
-  Widget _gpuBillsEntry(BuildContext context) {
+  /// 这里原来是两本账 ——「NAI 账单」(按月阶梯分摊)和「算力账单」(租卡 +
+  /// 视频按次实付);2026-10-18 起服务端并成了一个钱包,副行直接报余额。
+  Widget _walletEntry(BuildContext context) {
     final scheme = context.scheme;
-    final async = ref.watch(gpuBillsProvider);
-    final b = async.value;
-    final String sub;
-    if (b == null || !b.ok) {
-      sub = '独享实例与视频 · 按次实付';
-    } else if (b.isEmpty) {
-      sub = '暂无消费 · 免费共享出图不计费';
+    final async = ref.watch(walletSummaryProvider);
+    final w = async.value;
+    final style = context.texts.labelSmall!.copyWith(
+      color: scheme.onSurfaceVariant,
+    );
+    final Widget sub;
+    if (async.isLoading && w == null) {
+      sub = SkeletonText(
+        sample: '余额 ¥000.00',
+        style: context.texts.labelSmall!,
+        width: 84,
+      );
+    } else if (w == null) {
+      sub = Text('余额 · 流水 · 充值', style: style);
     } else {
-      sub =
-          '累计 ${fmtYuan(b.totalCost)} · 租卡 ${b.rentalHours} 小时'
-          '${b.running != null ? ' · 计费中' : ''}';
+      sub = Text.rich(
+        TextSpan(
+          children: [
+            const TextSpan(text: '余额 '),
+            TextSpan(
+              text: fmtFen(w.balanceFen, sign: false),
+              // 欠着钱标警示色:不点进去也该看得出来
+              style: w.owing
+                  ? TextStyle(color: scheme.error, fontWeight: FontWeight.w600)
+                  : null,
+            ),
+            if (w.pendingRentalCount > 0) const TextSpan(text: ' · 租卡进行中'),
+          ],
+        ),
+        style: style,
+      );
     }
     return _EntryCard(
-      icon: Icons.memory_outlined,
-      title: '算力账单',
-      subWidget: async.isLoading && b == null
-          ? SkeletonText(
-              sample: '累计 ¥00.00 · 租卡 0.0 小时',
-              style: context.texts.labelSmall!,
-              width: 150,
-            )
-          : Text(
-              sub,
-              style: context.texts.labelSmall!.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-      onTap: () => _push(const GpuBillsPage()),
+      icon: Icons.account_balance_wallet_outlined,
+      title: '钱包',
+      subWidget: sub,
+      onTap: () => _push(const WalletPage()),
     );
   }
 
@@ -779,12 +758,12 @@ class _ModePill extends StatelessWidget {
         );
 
     return PopupMenuButton<bool>(
-      tooltip: '数据源',
+      tooltip: context.l10n.dataSource,
       position: PopupMenuPosition.under,
       onSelected: onChanged,
       itemBuilder: (_) => [
-        item(true, Icons.smart_toy_outlined, 'Bot 授权'),
-        item(false, Icons.key, '直连 Key'),
+        item(true, Icons.smart_toy_outlined, context.l10n.botAuth),
+        item(false, Icons.key, context.l10n.directKey),
       ],
       child: Container(
         padding: const EdgeInsets.fromLTRB(11, 6, 7, 6),
@@ -836,43 +815,46 @@ class _EntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 13, 11, 13),
-          child: Row(
-            children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(10),
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 13, 11, 13),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, size: 17, color: scheme.onSurfaceVariant),
                 ),
-                child: Icon(icon, size: 17, color: scheme.onSurfaceVariant),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: context.texts.bodyLarge!.copyWith(
-                        fontWeight: FontWeight.w600,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: context.texts.bodyLarge!.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 3),
-                    subWidget,
-                  ],
+                      const SizedBox(height: 3),
+                      subWidget,
+                    ],
+                  ),
                 ),
-              ),
-              Icon(Icons.chevron_right, size: 20, color: scheme.outline),
-            ],
+                Icon(Icons.chevron_right, size: 20, color: scheme.outline),
+              ],
+            ),
           ),
         ),
       ),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/theme_settings.dart';
 import '../../../core/util/nai_tokenizer.dart';
@@ -8,6 +9,7 @@ import '../../editor/editor_page.dart';
 import '../../inspiration/tag_models.dart' show TagCategory, tagCategoryDef;
 import '../../inspiration/widgets/char_pick_sheet.dart';
 import '../../inspiration/widgets/tag_card.dart' show TagCardPreview;
+import '../canvas_state.dart';
 import '../char_position.dart';
 import '../generate_state.dart';
 import '../models.dart';
@@ -15,6 +17,8 @@ import 'common.dart';
 import 'position_grid_dialog.dart';
 import 'prompt_card.dart' show negativePreview;
 import 'section_card.dart';
+import '../../../l10n/l10n.dart';
+import '../display_names.dart';
 
 /// 角色面板:沿用创作页的容器与公共按钮,预览比例与灵感角色库一致。
 /// 点头像换角色、点名称改名;删除直接放在卡上,长按整卡仍可排序。
@@ -40,7 +44,7 @@ class CharacterCard extends ConsumerWidget {
 
     return SectionCard(
       icon: Icons.group_outlined,
-      title: '角色',
+      title: context.l10n.characters,
       reorderIndex: reorderIndex,
       badge: CountBadge('$active / $cap', error: active > cap),
       actions: [
@@ -48,7 +52,7 @@ class CharacterCard extends ConsumerWidget {
           RoundIconBtn(
             Icons.delete_sweep_outlined,
             size: actionSize,
-            tooltip: '清空全部角色',
+            tooltip: context.l10n.clearAllCharacters,
             color: scheme.onSurfaceVariant,
             onTap: () => _confirmClear(context, notifier),
           ),
@@ -56,14 +60,14 @@ class CharacterCard extends ConsumerWidget {
         RoundIconBtn(
           Icons.grid_view,
           size: actionSize,
-          tooltip: '角色库',
+          tooltip: context.l10n.characterLibrary,
           color: canAdd ? scheme.onSurfaceVariant : scheme.outline,
           onTap: canAdd ? () => _addFromLibrary(context, ref) : null,
         ),
         RoundIconBtn(
           Icons.add,
           size: actionSize,
-          tooltip: '添加角色',
+          tooltip: context.l10n.addCharacter,
           color: canAdd ? null : scheme.outline,
           onTap: canAdd ? notifier.addCharacter : null,
         ),
@@ -77,23 +81,29 @@ class CharacterCard extends ConsumerWidget {
       chevronPlaceholder: chars.isEmpty,
       body: chars.isEmpty
           ? null
-          // 长按卡片拖动排序。删除只走行内按钮 —— 横滑抹掉的是整份角色配置
-          // (提示词/站位/开关),而这里没有撤销可给。
-          : ReorderableListView(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              proxyDecorator: dragProxy,
-              onReorderStart: dragStartHaptic,
-              onReorderEnd: dragEndHaptic,
-              onReorderItem: notifier.reorderCharacters,
-              children: [
-                for (var i = 0; i < chars.length; i++)
-                  Padding(
-                    key: ValueKey('char${chars[i].id}'),
-                    padding: EdgeInsets.only(top: i > 0 ? 9 : 0),
-                    child: _CharacterTile(char: chars[i], index: i),
-                  ),
-              ],
+          // 增删角色时高度平滑过渡(第一个由卡片展开动画负责)
+          : AnimatedSize(
+              duration: Motion.medium,
+              curve: Motion.emphasized,
+              alignment: Alignment.topCenter,
+              // 长按卡片拖动排序。删除只走行内按钮(删了给撤销条),不做横滑删除
+              // —— 横滑一下就抹掉整份角色配置(提示词/站位/开关),太容易误触。
+              child: ReorderableListView(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                proxyDecorator: dragProxy,
+                onReorderStart: dragStartHaptic,
+                onReorderEnd: dragEndHaptic,
+                onReorderItem: notifier.reorderCharacters,
+                children: [
+                  for (var i = 0; i < chars.length; i++)
+                    Padding(
+                      key: ValueKey('char${chars[i].id}'),
+                      padding: EdgeInsets.only(top: i > 0 ? 9 : 0),
+                      child: _CharacterTile(char: chars[i], index: i),
+                    ),
+                ],
+              ),
             ),
     );
   }
@@ -112,6 +122,7 @@ class CharacterCard extends ConsumerWidget {
           positive: p.entry.positive,
           negative: p.entry.negative,
           avatar: p.preview,
+          source: p.entry.id,
         ),
     ]);
   }
@@ -123,12 +134,12 @@ class CharacterCard extends ConsumerWidget {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('清空全部角色?'),
-        content: const Text('将移除所有角色及其配置,此操作不可撤销。'),
+        title: Text(context.l10n.clearAllCharactersQ),
+        content: Text(context.l10n.clearAllCharactersBody),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
+            child: Text(context.l10n.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
@@ -136,7 +147,7 @@ class CharacterCard extends ConsumerWidget {
               backgroundColor: context.scheme.error,
               foregroundColor: context.scheme.onError,
             ),
-            child: const Text('清空'),
+            child: Text(context.l10n.clear),
           ),
         ],
       ),
@@ -159,35 +170,39 @@ class _CharacterTile extends ConsumerWidget {
   /// 名字只在 app 内显示:载荷里没有这一项,导入也读不回来,所以改名不影响出图,
   /// 也不必跟着图走。
   Future<void> _rename(BuildContext context, GenerateNotifier notifier) async {
+    final l = context.l10n;
     final fallback = '角色 ${index + 1}';
-    final ctrl = TextEditingController(text: char.name);
+    final shown = characterDisplayName(l, char.name);
+    final ctrl = TextEditingController(text: shown);
     final name = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('重命名'),
+        title: Text(l.rename),
         content: TextField(
           controller: ctrl,
           autofocus: true,
           decoration: InputDecoration(
             isDense: true,
-            hintText: fallback, // 留空就按默认编号显示
+            // 留空就按默认编号显示
+            hintText: characterDisplayName(l, fallback),
           ),
           onSubmitted: (v) => Navigator.pop(context, v),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
+            child: Text(context.l10n.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, ctrl.text),
-            child: const Text('保存'),
+            child: Text(context.l10n.save),
           ),
         ],
       ),
     );
     if (name == null) return; // 取消
     final trimmed = name.trim();
+    if (trimmed.isNotEmpty && trimmed == shown) return;
     notifier.updateCharacter(
       char.id,
       name: trimmed.isEmpty ? fallback : trimmed,
@@ -212,9 +227,11 @@ class _CharacterTile extends ConsumerWidget {
         (cur.positive.trim().isNotEmpty || cur.negative.trim().isNotEmpty)) {
       final ok = await confirmDialog(
         context,
-        title: '替换「${cur.name}」?',
-        message: '提示词将换成「${p.entry.name}」的。',
-        confirmLabel: '替换',
+        title: context.l10n.replaceCharQ(
+          characterDisplayName(context.l10n, cur.name),
+        ),
+        message: context.l10n.replaceCharBody(p.entry.name),
+        confirmLabel: context.l10n.replace,
       );
       if (!ok || !context.mounted) return;
     }
@@ -226,7 +243,37 @@ class _CharacterTile extends ConsumerWidget {
           positive: p.entry.positive,
           negative: p.entry.negative,
           avatar: p.preview,
+          source: p.entry.id,
         );
+  }
+
+  /// 删除这张卡,提示条给撤销:原样放回原来的位置。撤销条挂着的这几秒里
+  /// 切了画布,也还给删的那张。
+  void _remove(BuildContext context, WidgetRef ref) {
+    final canvases = ref.read(canvasWorkspaceProvider.notifier);
+    final canvasId = ref.read(canvasWorkspaceProvider).activeId;
+    final chars = ref.read(generateProvider).characters;
+    final at = chars.indexWhere((c) => c.id == char.id);
+    if (at < 0) return;
+    final removed = chars[at];
+    ref.read(generateProvider.notifier).removeCharacter(removed.id);
+    hintSnack(
+      context,
+      context.l10n.deletedNamed(
+        characterDisplayName(context.l10n, removed.name),
+      ),
+      icon: Icons.delete_outline,
+      actionLabel: context.l10n.undo,
+      onAction: () => canvases.updatePrompts(
+        canvasId,
+        (p) => p.characters.any((c) => c.id == removed.id)
+            ? p
+            : p.copyWith(
+                characters: [...p.characters]
+                  ..insert(at.clamp(0, p.characters.length), removed),
+              ),
+      ),
+    );
   }
 
   void _openEditor(BuildContext context, {required bool positive}) =>
@@ -263,9 +310,9 @@ class _CharacterTile extends ConsumerWidget {
     final promptStyle = context.texts.bodyMedium!;
     final countStyle = mono(
       context,
-      size: 11,
+      size: 12,
       weight: FontWeight.w500,
-    ).copyWith(color: scheme.outline);
+    ).copyWith(color: scheme.outline, height: 1.25);
 
     final name = InkWell(
       onTap: () => _rename(context, notifier),
@@ -273,7 +320,7 @@ class _CharacterTile extends ConsumerWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
         child: Text(
-          char.name,
+          characterDisplayName(context.l10n, char.name),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: context.texts.bodyLarge!.copyWith(
@@ -283,66 +330,62 @@ class _CharacterTile extends ConsumerWidget {
         ),
       ),
     );
+    // 浮卡样式下角色块是凹槽灰,块里的圆钮反用卡片白
+    final btnFill = context.skin.float ? scheme.surfaceContainerLow : null;
     final toggleBtn = RoundIconBtn(
       Icons.power_settings_new,
       size: controlSize,
+      background: btnFill,
       color: enabled ? scheme.primary : scheme.outline,
       onTap: () => notifier.updateCharacter(char.id, enabled: !enabled),
-      tooltip: enabled ? '停用(保留配置)' : '启用',
+      tooltip: enabled ? context.l10n.disableKeepConfig : context.l10n.enable,
     );
     final deleteBtn = RoundIconBtn(
       Icons.delete_outline,
       size: controlSize,
+      background: btnFill,
       color: scheme.error,
-      onTap: () => notifier.removeCharacter(char.id),
-      tooltip: '删除角色',
+      onTap: () => _remove(context, ref),
+      tooltip: context.l10n.deleteCharacter,
     );
     void openPosition() => showPositionGridDialog(context, char.id);
-    final positionTip = '设置角色位置：$positionLabel';
-    final positive = Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: Row(
-        crossAxisAlignment: compact
-            ? CrossAxisAlignment.center
-            : CrossAxisAlignment.end,
-        children: [
-          // 紧凑版的位置签排在正向预览左侧
-          if (compact) ...[
-            _PositionChip(
-              label: positionLabel,
-              auto: autoPos || positionLabel == 'AUTO',
-              enabled: enabled,
-              onTap: openPosition,
-            ),
-            const SizedBox(width: 8),
-          ],
-          Expanded(
-            child: Text(
-              char.positive.isEmpty ? '点击编辑提示词…' : char.positive,
-              maxLines: compact || hasNeg ? 1 : 2,
-              overflow: TextOverflow.ellipsis,
-              style: promptStyle.copyWith(
-                color: char.positive.isEmpty || !enabled
-                    ? scheme.outline
-                    : scheme.onSurfaceVariant,
-              ),
+    final positionTip = context.l10n.setCharPosition(positionLabel);
+    final positive = Row(
+      crossAxisAlignment: compact
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.end,
+      children: [
+        // 紧凑版的位置签排在正向预览左侧
+        if (compact) ...[
+          _PositionChip(
+            label: positionLabel,
+            auto: autoPos || positionLabel == 'AUTO',
+            enabled: enabled,
+            onTap: openPosition,
+          ),
+          const SizedBox(width: 8),
+        ],
+        Expanded(
+          child: Text(
+            char.positive.isEmpty
+                ? context.l10n.tapToEditPrompt
+                : char.positive,
+            maxLines: compact || hasNeg ? 1 : 2,
+            overflow: TextOverflow.ellipsis,
+            style: promptStyle.copyWith(
+              color: char.positive.isEmpty || !enabled
+                  ? scheme.outline
+                  : scheme.onSurfaceVariant,
             ),
           ),
-          if (char.positive.isNotEmpty) ...[
-            const SizedBox(width: 8),
-            Text(
-              '${totalPromptTokens(tokenizer, main: char.positive)}',
-              style: countStyle,
-            ),
-          ],
-        ],
-      ),
+        ),
+      ],
     );
     final negative = InkWell(
       onTap: () => _openEditor(context, positive: false),
       borderRadius: BorderRadius.circular(6),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(0, 3, 4, 3),
+        padding: const EdgeInsets.symmetric(vertical: 3),
         child: Row(
           children: [
             Icon(Icons.block, size: 14, color: negColor),
@@ -355,14 +398,43 @@ class _CharacterTile extends ConsumerWidget {
                 style: promptStyle.copyWith(color: negColor),
               ),
             ),
-            const SizedBox(width: 8),
-            Text(
-              '${totalPromptTokens(tokenizer, main: char.negative)}',
-              style: countStyle,
-            ),
           ],
         ),
       ),
+    );
+    // 提示词区:正负两行预览,右侧 token 数上正向、下负面(同分区行)
+    final prompts = Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              positive,
+              if (hasNeg) ...[SizedBox(height: compact ? 2 : 4), negative],
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Padding(
+          padding: const EdgeInsets.only(right: 4, bottom: 3),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                '${totalPromptTokens(tokenizer, main: char.positive)}',
+                style: countStyle,
+              ),
+              Text(
+                '${totalPromptTokens(tokenizer, main: char.negative)}',
+                style: countStyle.copyWith(color: negColor),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
 
     return Material(
@@ -389,6 +461,7 @@ class _CharacterTile extends ConsumerWidget {
                         RoundIconBtn(
                           Icons.location_on_outlined,
                           size: controlSize,
+                          background: btnFill,
                           color: posColor,
                           onTap: openPosition,
                           tooltip: positionTip,
@@ -400,8 +473,7 @@ class _CharacterTile extends ConsumerWidget {
                       ],
                     ),
                     const SizedBox(height: 6),
-                    positive,
-                    if (hasNeg) ...[const SizedBox(height: 2), negative],
+                    prompts,
                   ],
                 )
               : Row(
@@ -409,7 +481,7 @@ class _CharacterTile extends ConsumerWidget {
                   children: [
                     _Avatar(
                       url: char.avatar,
-                      name: char.name,
+                      name: characterDisplayName(context.l10n, char.name),
                       enabled: enabled,
                       onTap: () => _pickFromLibrary(context, ref),
                     ),
@@ -427,6 +499,7 @@ class _CharacterTile extends ConsumerWidget {
                               RoundIconBtn(
                                 Icons.location_on_outlined,
                                 size: controlSize,
+                                background: btnFill,
                                 color: posColor,
                                 onTap: openPosition,
                                 tooltip: positionTip,
@@ -448,7 +521,9 @@ class _CharacterTile extends ConsumerWidget {
                               const SizedBox(width: 4),
                               Expanded(
                                 child: Text(
-                                  autoPos ? '自动定位' : positionLabel,
+                                  autoPos
+                                      ? context.l10n.aiChoicePosition
+                                      : positionLabel,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: context.texts.bodySmall!.copyWith(
@@ -461,8 +536,7 @@ class _CharacterTile extends ConsumerWidget {
                           ),
                           const SizedBox(height: 6),
                           // 名称和提示词都占满预览图右侧。
-                          positive,
-                          if (hasNeg) ...[const SizedBox(height: 4), negative],
+                          prompts,
                         ],
                       ),
                     ),
@@ -494,7 +568,9 @@ class _PositionChip extends StatelessWidget {
     final scheme = context.scheme;
     final filled = enabled && !auto;
     return Material(
-      color: filled ? scheme.primaryContainer : Colors.transparent,
+      color: filled
+          ? context.solidFill(scheme.primaryContainer)
+          : Colors.transparent,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(6),
         side: filled
@@ -507,12 +583,12 @@ class _PositionChip extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
           child: Text(
-            auto ? '自动' : label,
+            auto ? context.l10n.aiChoice : label,
             maxLines: 1,
             style: context.texts.labelMedium!.copyWith(
               fontWeight: FontWeight.w600,
               color: filled
-                  ? scheme.onPrimaryContainer
+                  ? context.onSolidFill(scheme.onPrimaryContainer)
                   : enabled
                   ? scheme.onSurfaceVariant
                   : scheme.outline,
@@ -553,7 +629,9 @@ class _Avatar extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     final slot = ColoredBox(
-      color: scheme.surfaceContainerHighest,
+      color: context.skin.float
+          ? scheme.surfaceContainerLow
+          : scheme.surfaceContainerHighest,
       child: Center(
         child: Icon(
           Icons.person_search_outlined,
@@ -581,7 +659,9 @@ class _Avatar extends StatelessWidget {
       );
     }
     return Tooltip(
-      message: url == null ? '从角色库选' : '换角色',
+      message: url == null
+          ? context.l10n.pickFromCharLibrary
+          : context.l10n.swapCharacter,
       child: GestureDetector(
         onTap: onTap,
         behavior: HitTestBehavior.opaque,

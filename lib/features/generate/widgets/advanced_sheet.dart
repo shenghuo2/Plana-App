@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../generate_state.dart';
 import '../models.dart';
@@ -10,6 +11,7 @@ import '../preset_manage_page.dart';
 import '../prompt_presets.dart';
 import 'common.dart';
 import '../../../core/util/haptics.dart';
+import '../../../l10n/l10n.dart';
 
 /// 高级设置 Sheet:分区滚动,底部「恢复默认 / 确认」固定。
 /// Sheet 内编辑草稿,确认才写回全局状态。
@@ -82,12 +84,12 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
     final scheme = context.scheme;
     final isAnima = isAnimaModel(draft.model);
     final isKrea = isKreaModel(draft.model);
-    // 官方能力表里 V5 的 noiseSchedule 是 false —— 请求发出前 noise_schedule
-    // 被硬写回 karras。这个控件在 V5 下点了完全没反应,继续摆着就是骗人,
-    // 所以按能力面藏掉。
+    // V5 的 noise_schedule 请求前硬写回 karras;Medium 档步数、采样器固定,
+    // CFG Rescale 不发。这几项置灰显示实际生效值(见 [LockedParam])。
     final isV5 = isNai5Model(draft.model);
-    // Medium 档步数、采样器固定,CFG Rescale 不发,三项都不给调。
     final isMedium = isNai5MediumModel(draft.model);
+    final name = modelName(draft.model);
+    final noiseSchedule = isV5 ? 'karras' : draft.noiseSchedule;
     return Column(
       children: [
         Padding(
@@ -96,7 +98,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
             children: [
               Expanded(
                 child: Text(
-                  '高级设置',
+                  context.l10n.advancedSettings,
                   style: context.texts.titleMedium!.copyWith(
                     fontWeight: FontWeight.w700,
                   ),
@@ -115,12 +117,12 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
             padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
             children: [
               // 预设选择即时生效(全局偏好,不随「恢复默认/确认」走草稿)。
-              _SectionLabel('提示词预设'),
+              _SectionLabel(context.l10n.promptPresets),
               const SizedBox(height: 10),
               _PresetRow(model: draft.model),
               const SizedBox(height: 4),
               Text(
-                '生成时自动拼进正/负提示词,不占用输入框。V5 与 4.5 各有一套档。',
+                context.l10n.promptPresetsHelp,
                 style: context.texts.labelSmall!.copyWith(
                   color: scheme.outline,
                 ),
@@ -131,12 +133,12 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 height: 1,
               ),
               const SizedBox(height: 14),
-              _SectionLabel('采样'),
+              _SectionLabel(context.l10n.sectionSampling),
               const SizedBox(height: 10),
               if (isAnima) ...[
                 // Anima:与 NAI 两套独立采样参数,范围对齐 web animaOptions
                 ParamSlider(
-                  label: '步数 Steps',
+                  label: context.l10n.paramSteps,
                   help: Help.animaSteps,
                   value: draft.animaSteps.toDouble(),
                   min: animaStepsRange.min.toDouble(),
@@ -147,7 +149,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ),
                 const SizedBox(height: 8),
                 ParamSlider(
-                  label: '提示词引导 CFG',
+                  label: context.l10n.paramCfg,
                   help: Help.animaCfg,
                   value: draft.animaCfg,
                   min: animaCfgRange.min,
@@ -159,7 +161,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ),
                 const SizedBox(height: 12),
                 HelpLabel(
-                  text: '采样器 Sampler',
+                  text: context.l10n.paramSampler,
                   help: Help.animaSampler,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
@@ -184,7 +186,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ),
                 const SizedBox(height: 14),
                 HelpLabel(
-                  text: '调度器 Scheduler',
+                  text: context.l10n.paramScheduler,
                   help: Help.animaScheduler,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
@@ -212,7 +214,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 // steps/cfg/batch/loras,采样器固定 er_sde + simple —— 放出
                 // 采样器/调度器选择框等于骗用户,所以连字段都不存。
                 ParamSlider(
-                  label: '步数 Steps',
+                  label: context.l10n.paramSteps,
                   help: Help.kreaSteps,
                   value: draft.kreaSteps.toDouble(),
                   min: kreaStepsRange.min.toDouble(),
@@ -223,7 +225,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ),
                 const SizedBox(height: 8),
                 ParamSlider(
-                  label: '提示词引导 CFG',
+                  label: context.l10n.paramCfg,
                   help: Help.kreaCfg,
                   value: draft.kreaCfg,
                   min: kreaCfgRange.min,
@@ -246,7 +248,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ],
                 const SizedBox(height: 12),
                 HelpLabel(
-                  text: '采样器 Sampler',
+                  text: context.l10n.paramSampler,
                   help: Help.kreaSampler,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
@@ -271,7 +273,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ),
                 const SizedBox(height: 14),
                 HelpLabel(
-                  text: '调度器 Scheduler',
+                  text: context.l10n.paramScheduler,
                   help: Help.kreaScheduler,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
@@ -303,26 +305,36 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                   ),
                 ],
               ] else ...[
-                if (!isMedium) ...[
-                  ParamSlider(
-                    label: '步数 Steps',
+                LockedParam(
+                  hint: isMedium
+                      ? context.l10n.stepsFixed(name, kNai5MediumSteps)
+                      : null,
+                  child: ParamSlider(
+                    label: context.l10n.paramSteps,
                     help: Help.steps,
-                    value: draft.steps.toDouble(),
+                    value: draft.naiSteps.toDouble(),
                     min: 1,
                     max: 50,
                     divisions: 49,
-                    valueText: '${draft.steps}',
+                    snapTo: 28,
+                    valueText: '${draft.naiSteps}',
                     trailing: AnimatedOpacity(
                       duration: Motion.fast,
-                      opacity: draft.steps <= 28 ? 1 : 0,
-                      child: const CountBadge('≤28 免费'),
+                      opacity: draft.naiSteps <= 28 ? 1 : 0,
+                      child: CountBadge(context.l10n.freeUpTo28),
                     ),
-                    onChanged: (v) => _set(draft.copyWith(steps: v.round())),
+                    onChanged: (v) {
+                      final steps = v.round();
+                      if (steps == 28 && draft.naiSteps != 28) {
+                        Haptics.selection();
+                      }
+                      _set(draft.copyWith(steps: steps));
+                    },
                   ),
-                  const SizedBox(height: 8),
-                ],
+                ),
+                const SizedBox(height: 8),
                 ParamSlider(
-                  label: '提示词引导 CFG',
+                  label: context.l10n.paramCfg,
                   help: Help.cfg,
                   value: draft.cfg,
                   min: 0,
@@ -334,7 +346,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       _TextToggle(
-                        label: 'Variety+',
+                        label: context.l10n.varietyPlus,
                         selected: draft.varietyPlus,
                         onTap: () {
                           Haptics.selection();
@@ -346,60 +358,75 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                   ),
                   onChanged: (v) => _set(draft.copyWith(cfg: v)),
                 ),
-                if (!isMedium) ...[
-                  const SizedBox(height: 12),
-                  HelpLabel(
-                    text: '采样器 Sampler',
-                    help: Help.sampler,
-                    style: context.texts.bodySmall!.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  GridView.count(
-                    crossAxisCount: 2,
-                    mainAxisSpacing: 7,
-                    crossAxisSpacing: 7,
-                    childAspectRatio: 4.4,
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
+                const SizedBox(height: 12),
+                LockedParam(
+                  hint: isMedium
+                      ? context.l10n.samplerFixed(name, kNai5MediumSampler)
+                      : null,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final s in samplers)
-                        _SelectTile(
-                          label: s,
-                          selected: draft.sampler == s,
-                          onTap: () => _set(draft.copyWith(sampler: s)),
+                      HelpLabel(
+                        text: context.l10n.paramSampler,
+                        help: Help.sampler,
+                        style: context.texts.bodySmall!.copyWith(
+                          color: scheme.onSurfaceVariant,
                         ),
+                      ),
+                      const SizedBox(height: 8),
+                      GridView.count(
+                        crossAxisCount: 2,
+                        mainAxisSpacing: 7,
+                        crossAxisSpacing: 7,
+                        childAspectRatio: 4.4,
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        children: [
+                          for (final s in samplers)
+                            _SelectTile(
+                              label: s,
+                              selected: draft.naiSampler == s,
+                              onTap: () => _set(draft.copyWith(sampler: s)),
+                            ),
+                        ],
+                      ),
                     ],
                   ),
-                ],
-                // V5 恒 karras,不给选(见上面 isV5 的说明)
-                if (!isV5) ...[
-                  const SizedBox(height: 14),
-                  HelpLabel(
-                    text: '噪声调度 Noise Schedule',
-                    help: Help.noiseSchedule,
-                    style: context.texts.bodySmall!.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
+                ),
+                const SizedBox(height: 14),
+                LockedParam(
+                  hint: isV5 ? context.l10n.noiseScheduleFixed(name) : null,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final n in noiseSchedules) ...[
-                        Expanded(
-                          child: _SelectTile(
-                            label: n,
-                            selected: draft.noiseSchedule == n,
-                            height: 34,
-                            onTap: () => _set(draft.copyWith(noiseSchedule: n)),
-                          ),
+                      HelpLabel(
+                        text: context.l10n.paramNoiseSchedule,
+                        help: Help.noiseSchedule,
+                        style: context.texts.bodySmall!.copyWith(
+                          color: scheme.onSurfaceVariant,
                         ),
-                        if (n != noiseSchedules.last) const SizedBox(width: 7),
-                      ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          for (final n in noiseSchedules) ...[
+                            Expanded(
+                              child: _SelectTile(
+                                label: n,
+                                selected: noiseSchedule == n,
+                                height: 34,
+                                onTap: () =>
+                                    _set(draft.copyWith(noiseSchedule: n)),
+                              ),
+                            ),
+                            if (n != noiseSchedules.last)
+                              const SizedBox(width: 7),
+                          ],
+                        ],
+                      ),
                     ],
                   ),
-                ],
+                ),
               ],
               const SizedBox(height: 18),
               Divider(
@@ -407,7 +434,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 height: 1,
               ),
               const SizedBox(height: 14),
-              _SectionLabel('修正'),
+              _SectionLabel(context.l10n.sectionAdjust),
               const SizedBox(height: 10),
               // 「随机」是开关不是动作:开着 = 每次随机,输入框一并锁死(灰掉、
               // 点不进去),要手填种子先关掉它。骰子原先挂在输入框的 suffixIcon
@@ -422,8 +449,8 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                       keyboardType: TextInputType.number,
                       style: mono(context, size: 13),
                       decoration: InputDecoration(
-                        labelText: '种子 Seed',
-                        hintText: '每次随机',
+                        labelText: context.l10n.paramSeed,
+                        hintText: context.l10n.seedRandom,
                         // 标签常驻浮起,框里才腾得出「每次随机」这行灰字 ——
                         // 否则锁死状态下框里空空一片,只剩个灰标签
                         floatingLabelBehavior: FloatingLabelBehavior.always,
@@ -443,7 +470,9 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                     height: 48,
                     child: IconButton(
                       padding: EdgeInsets.zero,
-                      tooltip: randomSeed ? '每次随机 · 点击手填种子' : '手填种子 · 点击改为每次随机',
+                      tooltip: randomSeed
+                          ? context.l10n.seedRandomTooltip
+                          : context.l10n.seedManualTooltip,
                       onPressed: () => _setRandomSeed(!randomSeed),
                       // 图标字体只有一档笔画,选中态靠外面这圈主色底托 + 描边撑。
                       // 方角:挨着输入框,圆角对齐它的 12
@@ -475,14 +504,19 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                 ],
               ),
               // CFG Rescale 是 NAI 独有的;两个 Modal 渠道都没有这个参数
-              if (!isAnima && !isKrea && !isMedium) ...[
+              if (!isAnima && !isKrea) ...[
                 const SizedBox(height: 14),
-                ParamSlider(
-                  label: 'CFG Rescale',
-                  help: Help.cfgRescale,
-                  value: draft.cfgRescale,
-                  divisions: 100, // step 0.01(对齐 web)
-                  onChanged: (v) => _set(draft.copyWith(cfgRescale: v)),
+                LockedParam(
+                  hint: isMedium
+                      ? context.l10n.paramUnsupported(name, 'CFG Rescale')
+                      : null,
+                  child: ParamSlider(
+                    label: context.l10n.cfgRescale,
+                    help: Help.cfgRescale,
+                    value: isMedium ? 0 : draft.cfgRescale,
+                    divisions: 100, // step 0.01(对齐 web)
+                    onChanged: (v) => _set(draft.copyWith(cfgRescale: v)),
+                  ),
                 ),
               ],
             ],
@@ -539,7 +573,7 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                       borderRadius: BorderRadius.circular(24),
                     ),
                   ),
-                  child: const Text('恢复默认'),
+                  child: Text(context.l10n.resetSettings),
                 ),
               ),
               const SizedBox(width: 10),
@@ -561,9 +595,9 @@ class _AdvancedSheetState extends ConsumerState<_AdvancedSheet> {
                       borderRadius: BorderRadius.circular(24),
                     ),
                   ),
-                  child: const Text(
-                    '确认',
-                    style: TextStyle(fontWeight: FontWeight.w700),
+                  child: Text(
+                    context.l10n.confirm,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
@@ -613,9 +647,7 @@ class _SelectTile extends StatelessWidget {
       duration: Motion.fast,
       height: height,
       decoration: BoxDecoration(
-        color: selected
-            ? scheme.secondaryContainer
-            : scheme.surfaceContainerHigh,
+        color: selected ? context.selectedFill : scheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(11),
         border: Border.all(
           color: selected ? scheme.primary : Colors.transparent,
@@ -635,7 +667,7 @@ class _SelectTile extends StatelessWidget {
                 fontSize: 11.5,
                 fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                 color: selected
-                    ? scheme.onSecondaryContainer
+                    ? context.onSelectedFill
                     : scheme.onSurfaceVariant,
               ),
             ),
@@ -662,12 +694,12 @@ class _TextToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    final fg = selected ? scheme.onSecondaryContainer : scheme.onSurfaceVariant;
+    final fg = selected ? context.onSelectedFill : scheme.onSurfaceVariant;
     return AnimatedContainer(
       duration: Motion.fast,
       height: 28,
       decoration: BoxDecoration(
-        color: selected ? scheme.secondaryContainer : Colors.transparent,
+        color: selected ? context.selectedFill : Colors.transparent,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: selected ? scheme.primary : scheme.outlineVariant,
@@ -762,7 +794,7 @@ class _PresetRow extends ConsumerWidget {
                   DropdownMenuItem(
                     value: p.id,
                     child: Text(
-                      p.name,
+                      presetDisplayName(context.l10n, p),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -778,7 +810,7 @@ class _PresetRow extends ConsumerWidget {
         ),
         const SizedBox(width: 6),
         IconButton(
-          tooltip: '管理预设',
+          tooltip: context.l10n.managePresets,
           visualDensity: VisualDensity.compact,
           onPressed: () => Navigator.of(
             context,

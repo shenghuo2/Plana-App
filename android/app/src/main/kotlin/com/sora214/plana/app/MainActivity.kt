@@ -27,6 +27,18 @@ class MainActivity : FlutterActivity() {
                             call.argument("title"),
                             call.argument("text"),
                             call.argument<Int>("total") ?: 0,
+                            call.argument("short"),
+                        )
+                        result.success(null)
+                    }
+
+                    "channels" -> {
+                        LiveProgressService.setChannelNames(
+                            this,
+                            call.argument<String>("progress") ?: "",
+                            call.argument<String>("progressDesc") ?: "",
+                            call.argument<String>("done") ?: "",
+                            call.argument<String>("doneDesc") ?: "",
                         )
                         result.success(null)
                     }
@@ -49,6 +61,8 @@ class MainActivity : FlutterActivity() {
                             call.argument<String>("text") ?: "",
                             call.argument<String>("short") ?: "",
                             call.argument<Boolean>("keep") ?: true,
+                            call.argument<String>("next") ?: "",
+                            call.argument<String>("nextShort") ?: "",
                         )
                         result.success(null)
                     }
@@ -154,6 +168,22 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 名字胶囊配色:预览图底部中间的亮度,抽样解码在原生侧算,见 PreviewTone。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, TONE_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "measure" -> PreviewTone.measure(
+                        call.argument<String>("path"),
+                        call.argument<ByteArray>("bytes"),
+                        call.argument<Double>("x0") ?: 0.15,
+                        call.argument<Double>("x1") ?: 0.85,
+                        result,
+                    )
+
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -172,5 +202,6 @@ class MainActivity : FlutterActivity() {
         private const val UPDATE_CHANNEL = "plana/update"
         private const val HARMONY_CHANNEL = "plana/harmony_compat"
         private const val DOCUMENT_CHANNEL = "plana/document"
+        private const val TONE_CHANNEL = "plana/preview_tone"
     }
 }

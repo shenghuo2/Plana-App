@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:url_launcher/url_launcher.dart';
@@ -10,6 +8,7 @@ import '../generate/widgets/common.dart' show hintSnack, sharedAxisRoute;
 import '../onboarding/welcome_page.dart';
 import '../update/update_sheet.dart' show UpdateRow;
 import 'widgets/settings_ui.dart';
+import '../../l10n/l10n.dart';
 
 /// 关于:身份 + 出处 + 法律。
 ///
@@ -22,7 +21,7 @@ class AboutPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('关于')),
+      appBar: AppBar(title: Text(context.l10n.about)),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(14, 8, 14, 28),
         children: [
@@ -49,7 +48,7 @@ class AboutPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  kAppTagline,
+                  context.l10n.appTagline,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
@@ -76,7 +75,7 @@ class AboutPage extends StatelessWidget {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          '内测',
+                          context.l10n.beta,
                           style: TextStyle(
                             fontSize: 10.5,
                             fontWeight: FontWeight.w700,
@@ -90,17 +89,17 @@ class AboutPage extends StatelessWidget {
               ],
             ),
           ),
-          if (Platform.isAndroid && kUpdateGithubRepo.isNotEmpty) ...[
-            const SettingsLabel('版本'),
+          if (kUpdateGithubRepo.isNotEmpty) ...[
+            SettingsLabel(context.l10n.version),
             const SettingsCard(children: [UpdateRow()]),
             const SizedBox(height: 16),
           ],
-          const SettingsLabel('数据与资源'),
+          SettingsLabel(context.l10n.dataResources),
           SettingsCard(
             children: [
               SettingsRow(
                 icon: Icons.menu_book_outlined,
-                title: '法典图鉴',
+                title: context.l10n.codexSource,
                 value: 'quicktagcloud.com',
                 onTap: () => _open(context, kCodexSourceUrl),
               ),
@@ -108,49 +107,49 @@ class AboutPage extends StatelessWidget {
               // 关于页只交代东西从哪来。
               SettingsRow(
                 icon: Icons.sell_outlined,
-                title: '离线补全词库',
+                title: context.l10n.offlineDict,
                 value: 'Auto-NovelAI-Refactor',
                 onTap: () => _open(context, kOfflineTagSourceUrl),
               ),
               SettingsRow(
                 icon: Icons.translate_outlined,
-                title: '中文搜词与译名',
+                title: context.l10n.zhSearch,
                 value: 'DanbooruSearchOnline',
                 onTap: () => _open(context, kDanbooruSearchUrl),
               ),
               SettingsRow(
                 icon: Icons.auto_awesome_outlined,
-                title: '图像生成',
+                title: context.l10n.imageGen,
                 value: 'novelai.net',
                 onTap: () => _open(context, kNovelAiUrl),
               ),
               SettingsRow(
                 icon: Icons.blur_on,
-                title: '自动打码模型',
+                title: context.l10n.censorModel,
                 value: 'anime_censor_detection',
                 onTap: () => _open(context, kCensorModelUrl),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('交流'),
+          SettingsLabel(context.l10n.community),
           SettingsCard(
             children: [
               SettingsRow(
                 icon: Icons.forum_outlined,
-                title: 'QQ 交流群',
+                title: context.l10n.qqGroup,
                 value: kQqGroupId,
                 onTap: () => _copyQqGroup(context),
               ),
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('引导'),
+          SettingsLabel(context.l10n.guide),
           SettingsCard(
             children: [
               SettingsRow(
                 icon: Icons.flag_outlined,
-                title: '重新查看引导',
+                title: context.l10n.reviewGuide,
                 onTap: () => Navigator.of(
                   context,
                 ).push(sharedAxisRoute(const WelcomePage(replay: true))),
@@ -158,13 +157,13 @@ class AboutPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('法律'),
+          SettingsLabel(context.l10n.legal),
           SettingsCard(
             children: [
               if (kGithubRepo.isNotEmpty)
                 SettingsRow(
                   icon: Icons.code,
-                  title: '源码',
+                  title: context.l10n.sourceCode,
                   value: kGithubRepo,
                   onTap: () =>
                       _open(context, 'https://github.com/$kGithubRepo'),
@@ -180,18 +179,18 @@ class AboutPage extends StatelessWidget {
                 ),
               SettingsRow(
                 icon: Icons.balance_outlined,
-                title: '开源协议',
+                title: context.l10n.license,
                 value: kLicense,
                 onTap: () => _open(context, kLicenseUrl),
               ),
               SettingsRow(
                 icon: Icons.description_outlined,
-                title: '第三方许可',
+                title: context.l10n.thirdPartyLicenses,
                 onTap: () => showLicensePage(
                   context: context,
                   applicationName: kAppName,
                   applicationVersion: '$kAppVersion ($kAppBuild)',
-                  applicationLegalese: kLegalese,
+                  applicationLegalese: legalese(context.l10n),
                 ),
               ),
             ],
@@ -200,8 +199,7 @@ class AboutPage extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Text(
-              '$kAppName 是第三方客户端,与 NovelAI 官方无关联。'
-              '图像由 NovelAI 生成,账号与生成内容产生的一切责任由使用者承担。',
+              context.l10n.disclaimer(kAppName),
               style: context.texts.labelSmall!.copyWith(
                 color: scheme.outline,
                 height: 1.6,
@@ -218,7 +216,7 @@ class AboutPage extends StatelessWidget {
   Future<void> _copyQqGroup(BuildContext context) async {
     await Clipboard.setData(const ClipboardData(text: kQqGroupId));
     if (context.mounted) {
-      hintSnack(context, '已复制群号 $kQqGroupId', icon: Icons.copy);
+      hintSnack(context, context.l10n.qqCopied(kQqGroupId), icon: Icons.copy);
     }
   }
 
@@ -228,7 +226,11 @@ class AboutPage extends StatelessWidget {
       mode: LaunchMode.externalApplication,
     );
     if (!ok && context.mounted) {
-      hintSnack(context, '打不开浏览器', icon: Icons.link_off);
+      hintSnack(
+        context,
+        context.l10n.cantOpenBrowserShort,
+        icon: Icons.link_off,
+      );
     }
   }
 }

@@ -7,7 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/bot_session_store.dart';
 import '../../core/net/backend_client.dart';
 import '../../core/store/ui_prefs.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/ui/fast_scroll_handle.dart';
+import '../../core/ui/lift_menu.dart';
 import '../../core/ui/pinch_columns.dart';
 import '../../core/ui/scroll_memory.dart';
 import '../../core/ui/selection_bar.dart';
@@ -26,20 +29,24 @@ import 'public_tags.dart';
 import 'tag_editor_page.dart';
 import 'tag_library.dart';
 import 'tag_models.dart';
+import 'widgets/category_sheets.dart';
+import 'widgets/category_tabs.dart';
 import 'widgets/scope_seg_tabs.dart';
 import 'widgets/tag_card.dart';
 import 'widgets/tag_filter_chips.dart';
 import 'widgets/tag_filter_sheet.dart';
 import 'widgets/tag_sheets.dart';
 import '../../core/util/haptics.dart';
+import '../../l10n/l10n.dart';
 
 /// 顶部各行统一的左右边距;行尾若是 IconButton,用 [_kIconEdge]
 /// (减去按钮 8px 内衬)让图标视觉边与其他行对齐。
 const _kEdge = 14.0;
 const _kIconEdge = 6.0;
 
-/// 网格分组:一个区头 + 该组条目(我的/收藏的/公共)。
-typedef _Group = ({Widget header, List<TagEntry> items});
+/// 网格分组:一个区头 + 该组条目(我的/收藏的/公共/各作者)。
+/// 区头 null = 只有这一组、条数已在分段上,不再单起一行。
+typedef _Group = ({Widget? header, List<TagEntry> items});
 
 /// 网格卡片间距(骨架与真实网格共用,保证切换时不跳位)。
 const _gap = 10.0;
@@ -48,8 +55,8 @@ const _gap = 10.0;
 const _kCols = 2;
 
 /// 灵感页:web Tag 管理器的移动端形态(底部 tab 常驻页,非弹窗)。
-/// 布局随 Vibe 管理器(搜索 + 我的/公共库分段 + 网格 + 底部操作条),
-/// 分类切换走左侧抽屉(角色/画风/场景/其他;自定义分类未开放,不做)。
+/// 顶栏是分类页签,正文每个分类一页、左右滑切换;页里是搜索 + 我的/公共库
+/// 分段 + 标签筛选 + 网格,底部操作条在外层。
 class InspirationPage extends ConsumerStatefulWidget {
   const InspirationPage({super.key});
 
@@ -58,24 +65,614 @@ class InspirationPage extends ConsumerStatefulWidget {
 }
 
 class _InspirationPageState extends ConsumerState<InspirationPage>
+    with AutomaticKeepAliveClientMixin {
+  /// 当前页签的分类;在法典页时停在进法典之前那一类。
+  TagCategory _cat = TagCategory.character;
+
+  /// 当前在法典页。法典不属于 [TagCategory](无我的/公共库、无新建),
+  /// 故独立成一个模式位。
+  bool _codex = false;
+  static const _kCodexSel = '__codex__';
+
+  /// 每页一页的正文;顶栏页签跟着它的位置走。
+  PageController? _pc;
+  final _pagePos = ValueNotifier<double>(0);
+
+  /// 每分类已选 id(我的/公共库两 scope 共用一套,对齐 web selectionMap)。
+  final Map<TagCategory, Set<String>> _selected = {};
+
+  /// 每分类当前停在哪个 scope(0 = 我的,1 = 公共库),底栏按它换动作。
+  final Map<TagCategory, int> _scopes = {};
+
+  /// 批量操作进行中(禁重入)。
+  bool _busy = false;
+
+  /// 上次停在哪一页记在偏好里的键。
+  static const _kLastPage = 'inspiration';
+
+  @override
+  void initState() {
+    super.initState();
+    // 回到上次停的那一页
+    final last = ref.read(uiPrefsProvider).lastPages[_kLastPage];
+    if (last == kCodexTabKey) {
+      _codex = true;
+    } else if (last != null) {
+      _cat = tagCategoryByWebId(last) ?? TagCategory.character;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pc?.dispose();
+    _pagePos.dispose();
+    super.dispose();
+  }
+
+  @override
+  bool get wantKeepAlive => true;
+
+  TagCategoryDef get _def => tagCategoryDef(_cat);
+
+  Set<String> _selOf(TagCategory c) => _selected[c] ??= {};
+
+  Set<String> get _sel => _selOf(_cat);
+
+  void _toggle(TagCategory c, TagEntry e) {
+    // 角色分类的单次可选数 = 角色卡槽位,跟当前模型走(NAI 5 是 20);
+    // 其余分类仍用注册表里的静态上限。
+    final cap = c == TagCategory.character
+        ? maxCharactersOf(ref.read(generateProvider).params.model)
+        : tagCategoryDef(c).maxSelectable;
+    final sel = _selOf(c);
+    setState(() {
+      if (sel.contains(e.id)) {
+        sel.remove(e.id);
+      } else if (sel.length < cap) {
+        sel.add(e.id);
+      } else {
+        hintSnack(
+          context,
+          context.l10n.maxSelectN(cap),
+          icon: Icons.block_outlined,
+        );
+      }
+    });
+  }
+
+  void _onScope(TagCategory c, int i) {
+    if (_scopes[c] == i) return;
+    setState(() => _scopes[c] = i);
+  }
+
+  // ---- 回填(语义对齐 web;app 编辑器无芯片协议,按约定插裸内容) ----
+
+  List<TagEntry> _resolveSelected(TagLibraryState lib) {
+    final byId = {for (final e in lib.of(_cat)) e.id: e};
+    final pub = ref.read(publicTagsProvider(_cat)).value;
+    if (pub != null) {
+      for (final e in pub) {
+        byId[e.id] = e;
+      }
+    }
+    return [
+      for (final id in _sel)
+        if (byId[id] case final TagEntry e) e,
+    ];
+  }
+
+  Future<void> _afterConfirm(List<TagEntry> used, String message) async {
+    // 写进的是此刻的当前画布,提示条里的「套用」也按它回写
+    final canvasId = ref.read(canvasWorkspaceProvider).activeId;
+    await ref.read(tagLibraryProvider.notifier).markUsed(_cat, [
+      for (final e in used) e.id,
+    ]);
+    // 公共画师串使用计数上报(fire-and-forget)
+    if (_cat == TagCategory.artist) {
+      final session = ref.read(botSessionProvider).value;
+      if (session != null) {
+        final client = ref.read(backendClientProvider);
+        for (final e in used) {
+          if (e.id.startsWith('pub_') && e.publicId != null) {
+            unawaited(client.reportArtistUse(session.sessionId, e.publicId!));
+          }
+        }
+      }
+    }
+    setState(() => _sel.clear());
+    if (!mounted) return;
+    hintSnack(context, message, icon: Icons.check_circle_outline);
+    ref.read(shellIndexProvider.notifier).select(kTabCreate);
+    // 画风带推荐参数、且对得上当前模型的,弹窗问套不套
+    if (_cat == TagCategory.artist) {
+      await offerStyleRecipe(context, ref, used, canvasId: canvasId);
+    }
+  }
+
+  /// 角色 → 加入角色卡(带名追加,上限按模型截断,见 maxCharactersOf)。
+  Future<void> _confirmAsCharacters(TagLibraryState lib) async {
+    final entries = _resolveSelected(lib);
+    if (entries.isEmpty) return;
+    final cap = maxCharactersOf(ref.read(generateProvider).params.model);
+    final pubPreview = publicPreviewsOf(
+      ref.read(publicTagsProvider(_cat)).value,
+    );
+    final added = ref.read(generateProvider.notifier).addNamedCharactersFrom([
+      for (final e in entries)
+        (
+          name: e.name,
+          positive: e.positive,
+          negative: e.negative,
+          avatar: tagPreviewOf(e, pubPreview),
+          source: e.id,
+        ),
+    ]);
+    if (added == 0) {
+      hintSnack(
+        context,
+        context.l10n.charsFullN(cap),
+        icon: Icons.block_outlined,
+      );
+      return;
+    }
+    await _afterConfirm(
+      entries,
+      added < entries.length
+          ? context.l10n.addedCharsTruncated(added, cap)
+          : context.l10n.addedChars(added),
+    );
+  }
+
+  /// 角色「主提示词」/ 画风/场景/其他「确认选择」:正负向拼进主提示词。
+  /// 主提示词分过区时,每个条目自成一格、不折叠(同提示词卡头的「灵感库」)。
+  Future<void> _confirmToPrompt(TagLibraryState lib) async {
+    final entries = _resolveSelected(lib);
+    if (entries.isEmpty) return;
+    final gen = ref.read(generateProvider);
+    if (gen.sections.isNotEmpty) {
+      ref.read(generateProvider.notifier).addEntrySections(entries);
+      await _afterConfirm(entries, context.l10n.addedToPrompt);
+      return;
+    }
+    // 追加到编辑器原文草稿(带回既有的禁用/折叠),每个条目自成一个折叠组;
+    // 定稿由 outputOf 从草稿导出 —— 两者必须同时写,只写定稿的话草稿会被
+    // 判过期作废,这次加进去的折叠(以及用户原有的禁用词)就一起没了。
+    final draft = appendTagPositivesFolded(
+      pickEditorText(gen.promptRaw, gen.prompt),
+      entries,
+    );
+    final positive = outputOf(draft);
+    ref
+        .read(generateProvider.notifier)
+        .setPrompts(
+          positive: positive,
+          negative: appendTagNegatives(gen.negativePrompt, entries),
+          positiveRaw: draftOf(draft, positive),
+        );
+    await _afterConfirm(entries, context.l10n.addedToPrompt);
+  }
+
+  // ---- build ----
+
+  /// 顶栏页签:按类别管理里排的顺序,藏起来的不出。
+  List<Object> _tabKeys(TagLibraryState lib) => [
+    for (final k in lib.visibleTabKeys)
+      if (k == kCodexTabKey) _kCodexSel else ?tagCategoryByWebId(k),
+  ];
+
+  Object get _current => _codex ? _kCodexSel : _cat;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final scheme = context.scheme;
+    final lib = ref.watch(tagLibraryProvider).value ?? const TagLibraryState();
+    final keys = _tabKeys(lib);
+    var index = keys.indexOf(_current);
+    // 当前这一类被删了 / 藏起来了:回到角色
+    if (index < 0) {
+      _codex = false;
+      _cat = TagCategory.character;
+      index = keys.indexOf(_cat);
+    }
+    if (_pc == null) {
+      _pc = PageController(initialPage: index)..addListener(_onPageScroll);
+      _pagePos.value = index.toDouble();
+    }
+    final pc = _pc!;
+    // 页签增删、换序后,页码对不上当前分类了:原地跳回去
+    final sig = keys.map((k) => k is TagCategory ? k.name : _kCodexSel).join();
+    if (_keysSig != null && _keysSig != sig) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && pc.hasClients) pc.jumpToPage(index);
+      });
+    }
+    _keysSig = sig;
+
+    return Scaffold(
+      body: Column(
+        children: [
+          _topBar(scheme, keys, index),
+          Expanded(
+            child: NotificationListener<ScrollEndNotification>(
+              onNotification: (n) {
+                if (n.depth == 0 && n.metrics.axis == Axis.horizontal) {
+                  _settle(keys);
+                }
+                return false;
+              },
+              child: PageView.custom(
+                controller: pc,
+                // 当前分类等翻页停稳才换(见 _settle):翻到一半就整页重建会卡一帧
+                childrenDelegate: SliverChildBuilderDelegate(
+                  (context, i) {
+                    final k = keys[i];
+                    return k is TagCategory
+                        ? _CategoryPage(
+                            key: ValueKey(k.name),
+                            cat: k,
+                            host: this,
+                          )
+                        : const _KeepAlive(
+                            key: ValueKey(_kCodexSel),
+                            // 只读浏览器,自带选法典、搜索与筛选,无选择栏
+                            child: CodexView(),
+                          );
+                  },
+                  childCount: keys.length,
+                  findChildIndexCallback: (key) {
+                    final v = (key as ValueKey<String>).value;
+                    final i = keys.indexWhere(
+                      (k) => (k is TagCategory ? k.name : _kCodexSel) == v,
+                    );
+                    return i < 0 ? null : i;
+                  },
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: _codex ? null : _selectionBar(scheme, lib),
+    );
+  }
+
+  /// 上一次页签的排列(变了就把页码对回当前分类)。
+  String? _keysSig;
+
+  void _settle(List<Object> keys) {
+    final page = _pc?.page;
+    if (page == null) return;
+    final i = page.round();
+    if (i < 0 || i >= keys.length) return;
+    final k = keys[i];
+    if (k == _current) return;
+    ref
+        .read(uiPrefsProvider.notifier)
+        .setLastPage(
+          _kLastPage,
+          k is TagCategory ? tagCategoryDef(k).webId : kCodexTabKey,
+        );
+    setState(() {
+      if (k is TagCategory) {
+        _cat = k;
+        _codex = false;
+      } else {
+        _codex = true;
+      }
+    });
+  }
+
+  void _onPageScroll() {
+    final page = _pc?.page;
+    if (page != null) _pagePos.value = page;
+  }
+
+  Widget _topBar(ColorScheme scheme, List<Object> keys, int index) {
+    return Padding(
+      // 行尾是 IconButton:右边距减去它的内衬,图标视觉边与其他行对齐
+      padding: const EdgeInsets.fromLTRB(0, 6, _kIconEdge, 0),
+      child: Row(
+        children: [
+          Expanded(
+            child: CategoryTabs(
+              labels: [
+                for (final k in keys)
+                  k is TagCategory ? tagCategoryDef(k).label : codexTabLabel(),
+              ],
+              index: index,
+              position: _pagePos,
+              onTap: (i) => _pc?.animateToPage(
+                i,
+                duration: Motion.medium,
+                curve: Motion.standard,
+              ),
+              onManage: () => showCategoryManagerSheet(context),
+              leftPad: _kEdge,
+              capsule: true,
+            ),
+          ),
+          // 新建:翻向法典页时跟着翻页进度收起、淡出,翻回来再展开
+          ValueListenableBuilder(
+            valueListenable: _pagePos,
+            builder: (context, pos, child) {
+              final ci = keys.indexOf(_kCodexSel);
+              final hide = ci < 0
+                  ? 0.0
+                  : (1 - (pos - ci).abs()).clamp(0.0, 1.0).toDouble();
+              final t = Curves.easeOut.transform(1 - hide);
+              return IgnorePointer(
+                ignoring: hide > .5,
+                child: ClipRect(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: t,
+                    child: Opacity(opacity: t, child: child),
+                  ),
+                ),
+              );
+            },
+            child: IconButton(
+              tooltip: context.l10n.newLabel,
+              icon: const Icon(Icons.add),
+              onPressed: () => _openNew(_cat),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 新建:标题可点换成页签上的任一类(建错类别时就地改)。
+  void _openNew(TagCategory c) {
+    final lib = ref.read(tagLibraryProvider).value ?? const TagLibraryState();
+    Navigator.of(context).push(
+      sharedAxisRoute(
+        TagEditorPage(
+          cat: c,
+          categories: [
+            for (final k in lib.visibleTabKeys)
+              if (k != kCodexTabKey) ?tagCategoryByWebId(k),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _collect(TagEntry e) async {
+    final ok = await ref.read(tagLibraryProvider.notifier).collect(e);
+    if (!mounted) return;
+    hintSnack(
+      context,
+      ok ? '已收藏到「我的」' : '已经收藏过了',
+      icon: ok ? Icons.favorite : Icons.info_outline,
+    );
+  }
+
+  // ---- 批量操作(底栏第一层) ----
+
+  Future<void> _runBatch(Future<void> Function() op) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await op();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// 批量贴标签:选一个标签(可现场新建)并入所有选中条目。
+  Future<void> _batchTag(TagLibraryState lib) async {
+    final entries = _resolveSelected(lib);
+    if (entries.isEmpty) return;
+    final tag = await pickTagSheet(context, ref, _cat);
+    if (tag == null || !mounted) return;
+    await _runBatch(() async {
+      final notifier = ref.read(tagLibraryProvider.notifier);
+      await notifier.addPoolTag(_cat, tag);
+      var n = 0;
+      for (final e in entries) {
+        if (e.tags.contains(tag)) continue;
+        await notifier.upsert(e.copyWith(tags: [...e.tags, tag]..sort()));
+        n++;
+      }
+      if (mounted) {
+        hintSnack(
+          context,
+          context.l10n.taggedN(n, tag),
+          icon: Icons.sell_outlined,
+        );
+      }
+    });
+  }
+
+  Future<void> _batchDelete(TagLibraryState lib) =>
+      _deleteEntries(_resolveSelected(lib));
+
+  /// 删除条目:已发布的(created + publicId)连同公共库条目一并删。
+  ///
+  /// 卡片菜单和多选底栏走同一条 —— 早先卡片菜单只删本地、文案还恒写「仅删除
+  /// 本地条目」,已发布的条目从库里消失、公共库那份却还挂着,之后连管理入口
+  /// 都没有了。
+  Future<void> _deleteEntries(List<TagEntry> entries) async {
+    if (entries.isEmpty) return;
+    // 三种来源三种后果(对齐 web 桌面端管理器的单卡菜单):
+    //   created  发布过的 → 公共库条目 + 本地副本一起删
+    //   favorited 收藏来的 → 只丢自己这份副本,公共库原作不动
+    //   local     纯本地的 → 就是删本地
+    final published = [
+      for (final e in entries)
+        if (e.origin == TagOrigin.created && e.publicId != null) e,
+    ];
+    final favorited = [
+      for (final e in entries)
+        if (e.origin == TagOrigin.favorited) e,
+    ];
+    final localOnly = entries.length - published.length - favorited.length;
+    final one = entries.length == 1 ? entries.first : null;
+
+    final String title, message;
+    if (one != null) {
+      if (published.isNotEmpty) {
+        title = '删除「${one.name}」?';
+        message = '将彻底删除公共库条目与本地副本,不可恢复。';
+      } else if (favorited.isNotEmpty) {
+        title = '删除收藏?';
+        message = '将从本地移除「${one.name}」,公共库原作不受影响。';
+      } else {
+        title = context.l10n.deleteNamedQ(one.name);
+        message = context.l10n.localOnlyDeleteBody;
+      }
+    } else {
+      title = context.l10n.deleteNItemsQ(entries.length);
+      final lines = [
+        if (published.isNotEmpty) '· 你发布的 ${published.length} 项:连同公共库条目一起删',
+        if (favorited.isNotEmpty) '· 收藏的 ${favorited.length} 项:只移除本地副本,原作不动',
+        if (localOnly > 0) context.l10n.localOnlyNLine(localOnly),
+      ];
+      message = '${lines.join('\n')}\n\n${context.l10n.cantUndoShort}';
+    }
+    final ok = await confirmDialog(
+      context,
+      title: title,
+      message: message,
+      confirmLabel: context.l10n.delete,
+    );
+    if (!ok || !mounted) return;
+    await _runBatch(() async {
+      final notifier = ref.read(tagLibraryProvider.notifier);
+      final client = ref.read(backendClientProvider);
+      final session = ref.read(botSessionProvider).value;
+      var done = 0, failed = 0;
+      for (final e in entries) {
+        try {
+          if (e.origin == TagOrigin.created &&
+              e.publicId != null &&
+              session != null) {
+            if (_cat == TagCategory.character) {
+              await client.deletePublicOc(session.sessionId, e.publicId!);
+            } else {
+              await client.deletePublicArtist(session.sessionId, e.publicId!);
+            }
+          }
+          await notifier.remove(e.id);
+          done++;
+        } catch (_) {
+          failed++;
+        }
+      }
+      if (published.isNotEmpty) ref.invalidate(publicTagsProvider(_cat));
+      if (!mounted) return;
+      setState(() => _sel.clear());
+      hintSnack(
+        context,
+        failed > 0
+            ? context.l10n.deletedNFailed(done, failed)
+            : (one != null
+                  ? context.l10n.deletedLabel
+                  : context.l10n.deletedNItems(done)),
+        icon: Icons.delete_outline,
+      );
+    });
+  }
+
+  /// 批量收藏(公共库 scope)。
+  Future<void> _batchCollect(TagLibraryState lib) async {
+    final entries = _resolveSelected(lib);
+    if (entries.isEmpty) return;
+    await _runBatch(() async {
+      final notifier = ref.read(tagLibraryProvider.notifier);
+      var added = 0;
+      for (final e in entries) {
+        if (await notifier.collect(e)) added++;
+      }
+      if (!mounted) return;
+      setState(() => _sel.clear());
+      hintSnack(
+        context,
+        added == entries.length ? '已收藏 $added 项' : '已收藏 $added 项(其余已在库中)',
+        icon: Icons.favorite,
+      );
+    });
+  }
+
+  // ---- 底部操作条 ----
+
+  /// 角色模块对当前模型是否可见 —— 决定「加入角色」这个去处存不存在。
+  /// anima 下 NAI 四件套整组收走(角色卡都不渲染),此时加进去的角色既不进
+  /// 载荷也看不见,只会把提示词计数顶大,是个纯幽灵动作,故收起按钮。
+  bool get _charModuleOn {
+    final model = ref.watch(generateProvider.select((s) => s.params.model));
+    final ms = ref.watch(genModulesProvider).value ?? const GenModuleSettings();
+    return ms.isVisibleFor(GenModule.character, model);
+  }
+
+  /// 多选底栏(一行):✕ 取消 · 标签 / 收藏 · 删除 · 添加。
+  /// 「添加」:角色加成角色卡;角色模块不可见时(anima 等)和其余分类一样
+  /// 拼进主提示词。
+  Widget _selectionBar(ColorScheme scheme, TagLibraryState lib) {
+    final n = _sel.length;
+    final publicScope = _def.hasPublic && _scopes[_cat] == 1;
+    final asCharacters = _cat == TagCategory.character && _charModuleOn;
+    return SelectionBar(
+      visible: n > 0,
+      compact: true,
+      // shell 里的 tab 页,底部安全区由导航栏兜着
+      safeArea: false,
+      onClear: () => setState(() => _sel.clear()),
+      actions: [
+        if (publicScope)
+          SelectionIconButton(
+            icon: Icons.favorite_border,
+            tooltip: context.l10n.favoriteAction,
+            onTap: _busy ? null : () => _batchCollect(lib),
+          )
+        else
+          SelectionIconButton(
+            icon: Icons.sell_outlined,
+            tooltip: context.l10n.kindTag,
+            onTap: _busy ? null : () => _batchTag(lib),
+          ),
+      ],
+      destructive: publicScope
+          ? null
+          : SelectionIconButton(
+              icon: Icons.delete_outline,
+              tooltip: context.l10n.delete,
+              color: scheme.error,
+              onTap: _busy ? null : () => _batchDelete(lib),
+            ),
+      primary: FilledButton.icon(
+        onPressed: () =>
+            asCharacters ? _confirmAsCharacters(lib) : _confirmToPrompt(lib),
+        icon: Icon(asCharacters ? Icons.person_add_alt : Icons.add, size: 18),
+        label: Text(context.l10n.addN(n)),
+        style: selectionPrimaryStyle(),
+      ),
+    );
+  }
+}
+
+/// 一个分类的正文:搜索 + 我的/公共库分段 + 标签筛选 + 网格。每页各记各的
+/// 搜索、筛选、分段与列数;选择与批量动作在外层 [_InspirationPageState]。
+class _CategoryPage extends ConsumerStatefulWidget {
+  const _CategoryPage({super.key, required this.cat, required this.host});
+
+  final TagCategory cat;
+  final _InspirationPageState host;
+
+  @override
+  ConsumerState<_CategoryPage> createState() => _CategoryPageState();
+}
+
+class _CategoryPageState extends ConsumerState<_CategoryPage>
     with
         AutomaticKeepAliveClientMixin,
         TickerProviderStateMixin,
         PinchColumnsMixin {
-  TagCategory _cat = TagCategory.character;
-
-  /// 选中「法典」分类:正文切换为只读的法典浏览器 [CodexView],其余分类照旧。
-  /// 法典不属于 [TagCategory](无我的/公共库、无备份/新建),故独立成一个模式位,
-  /// 不污染四类标签库的分支逻辑。
-  bool _codex = false;
-  static const _kCodexSel = '__codex__';
-
-  /// 法典正文进过一次就一直挂着(切回标签库时只是藏起来),没进过不建、不拉数据。
-  bool _codexBuilt = false;
+  TagCategory get _cat => widget.cat;
 
   late final TabController _tab = TabController(length: 2, vsync: this);
-  // 账本 key 跟着当前分类走;网格按分类 + 分段换 key 重建,新网格从各自的账上落位
-  // (换分类、换分段、骨架换成内容都一样)。
   late final _mineScroll = MemoScrollController.keyed(
     () => _scrollKey(_cat, false),
   );
@@ -83,13 +680,8 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
     () => _scrollKey(_cat, true),
   );
 
-  /// 每分类已选 id(我的/公共库两 scope 共用一套,对齐 web selectionMap)。
-  final Map<TagCategory, Set<String>> _selected = {};
-
-  /// 公共库里点开过原图的打码条目(`分类/id`),本次运行内一直显示原图。
+  /// 公共库里点开过原图的打码条目,本次运行内一直显示原图。
   final _revealed = <String>{};
-
-  static String _revealKey(TagEntry e) => '${e.category.name}/${e.id}';
 
   String _search = '';
 
@@ -110,14 +702,10 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
   /// 好让 [_matches] 这些深处的过滤函数不必层层传参;取不到就是空表(显示 QQ 号)。
   Map<String, String> _authorNames = const {};
 
-  /// 排序档,每个分类记各的。与搜索/筛选不同,**换分类不重置** —— 它是「我想
-  /// 怎么看这一类」的偏好,回来还想看到上次那个排法。
-  final Map<TagCategory, TagSort> _sortBy = {};
+  /// 排序档;null = 该分类原本的排法。
+  TagSort? _sortOverride;
 
-  TagSort get _sortMode => _sortBy[_cat] ?? defaultTagSort(_cat);
-
-  /// 批量操作进行中(禁重入)。
-  bool _busy = false;
+  TagSort get _sortMode => _sortOverride ?? defaultTagSort(_cat);
 
   int _tabIndex = 0;
 
@@ -127,7 +715,10 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
     // 只在整数位变化时 setState(筛选行随 scope 显隐)。
     _tab.animation!.addListener(() {
       final i = _tab.animation!.value.round();
-      if (i != _tabIndex && mounted) setState(() => _tabIndex = i);
+      if (i != _tabIndex && mounted) {
+        setState(() => _tabIndex = i);
+        widget.host._onScope(_cat, i);
+      }
     });
   }
 
@@ -144,44 +735,21 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
 
   TagCategoryDef get _def => tagCategoryDef(_cat);
 
-  Set<String> get _sel => _selected[_cat] ??= {};
+  Set<String> get _sel => widget.host._selOf(_cat);
 
-  void _toggle(TagEntry e) {
-    // 角色分类的单次可选数 = 角色卡槽位,跟当前模型走(NAI 5 是 20);
-    // 其余分类仍用注册表里的静态上限。
-    final cap = _cat == TagCategory.character
-        ? maxCharactersOf(ref.read(generateProvider).params.model)
-        : _def.maxSelectable;
-    setState(() {
-      if (_sel.contains(e.id)) {
-        _sel.remove(e.id);
-      } else if (_sel.length < cap) {
-        _sel.add(e.id);
-      } else {
-        hintSnack(context, '最多选 $cap 个', icon: Icons.block_outlined);
-      }
-    });
+  static String _revealKey(TagEntry e) => '${e.category.name}/${e.id}';
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final lib = ref.watch(tagLibraryProvider).value ?? const TagLibraryState();
+    _authorNames = ref.watch(tagAuthorNamesProvider).value ?? const {};
+    return _tagBody(context.scheme, lib, _def);
   }
 
   /// 滚动记忆的账本 key:每个分类的两个 scope 各记各的。
   String _scrollKey(TagCategory c, bool pub) =>
       'inspiration.${c.name}.${pub ? 'public' : 'mine'}';
-
-  void _switchCategory(TagCategory c) {
-    if (c == _cat) return;
-    // 滚动位置不用在这里搬:网格的 widget key 带分类,换完 _cat 就是一份新列表,
-    // 挂上控制器时从新分类的账上落位(见 [MemoScrollController])。
-    setState(() {
-      _cat = c;
-      _search = '';
-      _filter = null;
-      _modelFilter = null;
-      _authorFilter = null;
-      if (!tagCategoryDef(c).hasPublic) _tab.index = 0;
-    });
-    // 换完 _cat 再换:上限跟着新分类的卡片形状走
-    jumpGridColumns(_savedCols(c));
-  }
 
   // ---- 双指捏合改列数(见 PinchColumnsMixin) ----
 
@@ -320,199 +888,63 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
       ? list.sort((a, b) => naturalCompare(a.name, b.name))
       : list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
-  // ---- 回填(语义对齐 web;app 编辑器无芯片协议,按约定插裸内容) ----
-
-  List<TagEntry> _resolveSelected(TagLibraryState lib) {
-    final byId = {for (final e in lib.of(_cat)) e.id: e};
-    final pub = ref.read(publicTagsProvider(_cat)).value;
-    if (pub != null) {
-      for (final e in pub) {
-        byId[e.id] = e;
-      }
-    }
-    return [
-      for (final id in _sel)
-        if (byId[id] case final TagEntry e) e,
-    ];
-  }
-
-  Future<void> _afterConfirm(List<TagEntry> used, String message) async {
-    // 写进的是此刻的当前画布,提示条里的「套用」也按它回写
-    final canvasId = ref.read(canvasWorkspaceProvider).activeId;
-    await ref.read(tagLibraryProvider.notifier).markUsed(_cat, [
-      for (final e in used) e.id,
-    ]);
-    // 公共画师串使用计数上报(fire-and-forget)
-    if (_cat == TagCategory.artist) {
-      final session = ref.read(botSessionProvider).value;
-      if (session != null) {
-        final client = ref.read(backendClientProvider);
-        for (final e in used) {
-          if (e.id.startsWith('pub_') && e.publicId != null) {
-            unawaited(client.reportArtistUse(session.sessionId, e.publicId!));
-          }
-        }
-      }
-    }
-    setState(() => _sel.clear());
-    if (!mounted) return;
-    hintSnack(context, message, icon: Icons.check_circle_outline);
-    ref.read(shellIndexProvider.notifier).select(kTabCreate);
-    // 画风带推荐参数、且对得上当前模型的,弹窗问套不套
-    if (_cat == TagCategory.artist) {
-      await offerStyleRecipe(context, ref, used, canvasId: canvasId);
-    }
-  }
-
-  /// 角色 → 加入角色卡(带名追加,上限按模型截断,见 maxCharactersOf)。
-  Future<void> _confirmAsCharacters(TagLibraryState lib) async {
-    final entries = _resolveSelected(lib);
-    if (entries.isEmpty) return;
-    final cap = maxCharactersOf(ref.read(generateProvider).params.model);
-    final pubPreview = publicPreviewsOf(
-      ref.read(publicTagsProvider(_cat)).value,
-    );
-    final added = ref.read(generateProvider.notifier).addNamedCharactersFrom([
-      for (final e in entries)
-        (
-          name: e.name,
-          positive: e.positive,
-          negative: e.negative,
-          avatar: tagPreviewOf(e, pubPreview),
-        ),
-    ]);
-    if (added == 0) {
-      hintSnack(context, '角色已满 $cap 个', icon: Icons.block_outlined);
-      return;
-    }
-    await _afterConfirm(
-      entries,
-      added < entries.length ? '已加入 $added 个角色(超出 $cap 个截断)' : '已加入 $added 个角色',
-    );
-  }
-
-  /// 角色「主提示词」/ 画风/场景/其他「确认选择」:正负向拼进主提示词。
-  /// 主提示词分过区时,每个条目自成一格、不折叠(同提示词卡头的「灵感库」)。
-  Future<void> _confirmToPrompt(TagLibraryState lib) async {
-    final entries = _resolveSelected(lib);
-    if (entries.isEmpty) return;
-    final gen = ref.read(generateProvider);
-    if (gen.sections.isNotEmpty) {
-      ref.read(generateProvider.notifier).addEntrySections(entries);
-      await _afterConfirm(entries, '已加入提示词');
-      return;
-    }
-    // 追加到编辑器原文草稿(带回既有的禁用/折叠),每个条目自成一个折叠组;
-    // 定稿由 outputOf 从草稿导出 —— 两者必须同时写,只写定稿的话草稿会被
-    // 判过期作废,这次加进去的折叠(以及用户原有的禁用词)就一起没了。
-    final draft = appendTagPositivesFolded(
-      pickEditorText(gen.promptRaw, gen.prompt),
-      entries,
-    );
-    final positive = outputOf(draft);
-    ref
-        .read(generateProvider.notifier)
-        .setPrompts(
-          positive: positive,
-          negative: appendTagNegatives(gen.negativePrompt, entries),
-          positiveRaw: draftOf(draft, positive),
-        );
-    await _afterConfirm(entries, '已加入提示词');
-  }
-
-  // ---- build ----
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    final scheme = context.scheme;
-    final lib = ref.watch(tagLibraryProvider).value ?? const TagLibraryState();
-    final def = _def;
-    _authorNames = ref.watch(tagAuthorNamesProvider).value ?? const {};
-
-    // 标签库与法典两套正文都挂着、只显示其一:来回切换时两边的滚动位置、
-    // 搜索框、分段都原样还在(原来是整块拆掉重建,切回来就回到顶上)。
-    return Scaffold(
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          _shown(!_codex, _tagBody(scheme, lib, def)),
-          // 法典模式:只留分类胶囊的顶栏 + 只读浏览器,无搜索/分段/筛选/选择栏
-          // (法典自带选择器与搜索)。
-          if (_codexBuilt)
-            _shown(
-              _codex,
-              Column(
-                children: [
-                  _topBarCodex(scheme, lib),
-                  const Expanded(child: CodexView()),
-                ],
-              ),
-            ),
-        ],
-      ),
-      bottomNavigationBar: _codex ? null : _selectionBar(scheme, lib),
-    );
-  }
-
-  /// 藏起来但不拆:不绘制、不接手势、不占焦点、动画停走,状态全留着。
-  Widget _shown(bool on, Widget child) => Offstage(
-    offstage: !on,
-    child: TickerMode(
-      enabled: on,
-      child: ExcludeFocus(excluding: !on, child: child),
-    ),
-  );
-
   Widget _tagBody(ColorScheme scheme, TagLibraryState lib, TagCategoryDef def) {
     return Column(
       children: [
-        _topBar(scheme, lib),
         Padding(
-          padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 0),
-          child: TextField(
-            key: ValueKey('tag-search-${def.webId}'),
-            onChanged: (v) => setState(() => _search = v),
-            decoration: InputDecoration(
-              isDense: true,
-              hintText: def.searchHint,
-              prefixIcon: const Icon(Icons.search, size: 20),
-              filled: true,
-              fillColor: scheme.surfaceContainerHigh,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
+          padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  // 与右边的分段同高
+                  height: 40,
+                  child: TextField(
+                    key: ValueKey('tag-search-${def.webId}'),
+                    onChanged: (v) => setState(() => _search = v),
+                    textAlignVertical: TextAlignVertical.center,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: def.searchHint,
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      prefixIconConstraints: const BoxConstraints(
+                        minWidth: 40,
+                        minHeight: 40,
+                      ),
+                      filled: true,
+                      fillColor: context.pageControlFill,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                      // 「作者 / 适用模型 / 排序」挂在搜索框里:它们和下面的标签筛选是
+                      // 正交维度,塞进同一条 chip 行会让人以为是同一组单选。
+                      // 只给有公共库的两类(角色/画风)—— 场景/其他的条目全是自己的。
+                      suffixIcon: def.hasPublic ? _filterButton(scheme) : null,
+                      suffixIconConstraints: const BoxConstraints(
+                        minWidth: 0,
+                        maxWidth: 130,
+                        maxHeight: 40,
+                      ),
+                    ),
+                  ),
+                ),
               ),
-              contentPadding: const EdgeInsets.symmetric(vertical: 8),
-              // 「作者 / 适用模型」筛选挂在搜索框里:它们和左边的标签筛选是正交
-              // 维度,塞进同一条 chip 行既会让人以为是同一组单选,标签一多还会被
-              // 挤到屏幕外。挂这儿两个 scope 都有,且不多占一行高度。
-              // 只给有公共库的两类(角色/画风)—— 场景/其他的条目全是自己的,
-              // 没有「别人」可筛。
-              suffixIcon: def.hasPublic ? _filterButton(scheme) : null,
-              suffixIconConstraints: const BoxConstraints(
-                minWidth: 0,
-                maxWidth: 190,
-              ),
-            ),
+              if (def.hasPublic) ...[
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 132,
+                  child: ScopeSegTabs(
+                    controller: _tab,
+                    mineCount: _mineAll(lib).length,
+                    compact: true,
+                  ),
+                ),
+              ],
+            ],
           ),
         ),
-        if (def.hasPublic)
-          Padding(
-            // 「我的」下面紧跟筛选行,间距由它顶出,这里不再留底距;
-            // 公共态没有筛选行,分段行会直接贴上网格首个分组头(顶衬仅 2),
-            // 补一档底距回到与上方各行相同的 8 节奏。
-            padding: EdgeInsets.fromLTRB(
-              _kEdge,
-              8,
-              _kEdge,
-              _tabIndex == 0 ? 0 : 8,
-            ),
-            child: ScopeSegTabs(
-              controller: _tab,
-              mineCount: lib.of(_cat).length,
-            ),
-          ),
         if (_tabIndex == 0 || !def.hasPublic) _filterChips(lib),
         Expanded(
           // 禁 TabBarView 横滑:横滑手势留给 shell PageView 切底部 tab
@@ -531,210 +963,6 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
     );
   }
 
-  Widget _topBar(ColorScheme scheme, TagLibraryState lib) {
-    return Padding(
-      // 行尾是 IconButton:右边距减去它的内衬,图标视觉边与其他行对齐
-      padding: const EdgeInsets.fromLTRB(_kEdge, 6, _kIconEdge, 0),
-      child: Row(
-        children: [
-          _categoryPill(scheme, lib),
-          const Spacer(),
-          // 排序只给有公共库的两类:场景/其他的条目全是自己的,没有作者可分组
-          if (_def.hasPublic) _sortButton(scheme),
-          IconButton(
-            tooltip: '数据备份',
-            icon: const Icon(Icons.cloud_outlined),
-            onPressed: () => showTagBackupSheet(context, ref),
-          ),
-          IconButton(
-            tooltip: '新建',
-            icon: const Icon(Icons.add),
-            onPressed: () => Navigator.of(
-              context,
-            ).push(sharedAxisRoute(TagEditorPage(cat: _cat))),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 顶栏的排序按钮。不是默认档时图标点主色 —— 「列表怎么变了个顺序」
-  /// 得能一眼找到是这儿改的。
-  Widget _sortButton(ColorScheme scheme) {
-    final mode = _sortMode;
-    final on = mode != defaultTagSort(_cat);
-    return PopupMenuButton<TagSort>(
-      tooltip: '排序:${mode.label}',
-      offset: const Offset(0, 44),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      onSelected: (v) => setState(() => _sortBy[_cat] = v),
-      itemBuilder: (_) => [
-        for (final s in tagSortOptions(_cat))
-          PopupMenuItem(
-            value: s,
-            child: Row(
-              children: [
-                Text(s.label),
-                const Spacer(),
-                if (s == mode)
-                  Icon(Icons.check, size: 18, color: scheme.primary),
-              ],
-            ),
-          ),
-      ],
-      icon: Icon(
-        Icons.sort,
-        color: on ? scheme.primary : scheme.onSurfaceVariant,
-      ),
-    );
-  }
-
-  /// 法典模式顶栏:左分类胶囊 + 右侧「选择主法典」(占用原本的空位,
-  /// CodexView 不再自带头部整行)。
-  Widget _topBarCodex(ColorScheme scheme, TagLibraryState lib) => Padding(
-    padding: const EdgeInsets.fromLTRB(_kEdge, 6, _kEdge, 0),
-    // 定高 48 与标签页 _topBar 对齐(那边由 IconButton 撑到 48,胶囊居中留 2px
-    // 呼吸位)。否则本行仅胶囊高 44,整行偏矮、胶囊贴顶,比标签页明显偏上。
-    child: SizedBox(
-      height: 48,
-      child: Row(
-        children: [
-          _categoryPill(scheme, lib),
-          const SizedBox(width: 10),
-          // 靠右、按内容自适应宽度(不撑满);标题过长时才截断
-          const Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: CodexPickerButton(),
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-
-  /// 分类选择(四类标签库 + 法典)。法典是特殊项:切模式,不走 [_switchCategory]。
-  void _onPickCat(Object v) {
-    if (v == _kCodexSel) {
-      setState(() => _codex = _codexBuilt = true);
-    } else if (v is TagCategory) {
-      if (_codex) setState(() => _codex = false);
-      _switchCategory(v);
-    }
-  }
-
-  /// 分类切换:整块 filled 胶囊(图标+名称+计数+▾),点开下拉选分类。
-  Widget _categoryPill(ColorScheme scheme, TagLibraryState lib) {
-    return PopupMenuButton<Object>(
-      tooltip: '切换分类',
-      offset: const Offset(0, 50),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      onSelected: _onPickCat,
-      itemBuilder: (_) => [
-        for (final d in kTagCategoryDefs)
-          PopupMenuItem(
-            value: d.key,
-            child: _catMenuRow(
-              scheme,
-              d.icon,
-              d.label,
-              d.key == _cat && !_codex,
-            ),
-          ),
-        const PopupMenuDivider(),
-        PopupMenuItem(
-          value: _kCodexSel,
-          child: _catMenuRow(scheme, Icons.menu_book_outlined, '法典', _codex),
-        ),
-      ],
-      child: Container(
-        height: 44,
-        padding: const EdgeInsets.fromLTRB(14, 0, 10, 0),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(22),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: _codex
-              ? [
-                  Icon(Icons.menu_book, size: 19, color: scheme.primary),
-                  const SizedBox(width: 8),
-                  Text(
-                    '法典',
-                    style: context.texts.titleMedium!.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.keyboard_arrow_down,
-                    size: 20,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ]
-              : [
-                  Icon(_def.icon, size: 19, color: scheme.primary),
-                  const SizedBox(width: 8),
-                  Text(
-                    _def.label,
-                    style: context.texts.titleMedium!.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 1.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.primary,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      '${lib.of(_cat).length}',
-                      style: context.texts.labelSmall!.copyWith(
-                        color: scheme.onPrimary,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.keyboard_arrow_down,
-                    size: 20,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ],
-        ),
-      ),
-    );
-  }
-
-  /// 分类下拉的一行(图标 + 名称 + 选中勾)。
-  Widget _catMenuRow(
-    ColorScheme scheme,
-    IconData icon,
-    String label,
-    bool sel,
-  ) => Row(
-    children: [
-      Icon(
-        icon,
-        size: 19,
-        color: sel ? scheme.primary : scheme.onSurfaceVariant,
-      ),
-      const SizedBox(width: 12),
-      Text(
-        label,
-        style: TextStyle(fontWeight: sel ? FontWeight.w700 : FontWeight.w500),
-      ),
-      const Spacer(),
-      if (sel) Icon(Icons.check, size: 16, color: scheme.primary),
-    ],
-  );
-
   /// 当前模型筛选的显示名;null = 全部。
   String? get _modelFilterLabel {
     final f = _modelFilter;
@@ -752,12 +980,13 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
   /// 漏斗里的两维有没有在筛(空列表的说法要跟着变:是"没匹配上"而不是"库是空的")。
   bool get _narrowed => _authorFilter != null || _modelFilter != null;
 
-  /// 药丸上的字;null = 没在筛。两维都筛着就并排写 ——「有没有在筛、筛的哪一档」
-  /// 得一眼看见,否则会出现"我的串怎么少了"。
+  /// 药丸上的字;null = 没在筛、也是默认排序。几维都改着就并排写 ——
+  /// 「有没有在筛、筛的哪一档」得一眼看见,否则会出现"我的串怎么少了"。
   String? get _filterPillLabel {
     final parts = [
       if (_authorFilter != null) _authorLabel(_authorFilter!),
       ?_modelFilterLabel,
+      if (_sortMode != defaultTagSort(_cat)) _sortMode.label,
     ];
     return parts.isEmpty ? null : parts.join(' · ');
   }
@@ -767,7 +996,7 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
     final label = _filterPillLabel;
     if (label == null) {
       return IconButton(
-        tooltip: '筛选',
+        tooltip: context.l10n.filter,
         visualDensity: VisualDensity.compact,
         icon: Icon(
           Icons.filter_alt_outlined,
@@ -808,6 +1037,7 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
               onTap: () => setState(() {
                 _authorFilter = null;
                 _modelFilter = null;
+                _sortOverride = null;
               }),
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(2, 5, 8, 5),
@@ -835,14 +1065,17 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
     final picked = await showTagFilterSheet(
       context,
       authors: collectTagAuthors(scope, _authorNames),
-      current: (author: _authorFilter, model: _modelFilter),
+      current: (author: _authorFilter, model: _modelFilter, sort: _sortMode),
       // 适用模型只有画风有;角色那张表就少这一节。
       hasModels: _cat == TagCategory.artist,
+      sorts: tagSortOptions(_cat),
+      defaultSort: defaultTagSort(_cat),
     );
     if (!mounted || picked == null) return; // null = 点外面关掉,不改
     setState(() {
       _authorFilter = picked.author;
       _modelFilter = picked.model;
+      _sortOverride = picked.sort;
     });
   }
 
@@ -859,10 +1092,17 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
   Widget _mineTab(TagLibraryState lib) {
     final list = _mineList(lib);
     if (list.isEmpty) {
+      final narrowed = _search.isNotEmpty || _filter != null || _narrowed;
       return _empty(
-        _search.isNotEmpty || _filter != null || _narrowed
-            ? '没有匹配的${_def.label}'
-            : '还没有${_def.label},点右上角 + 新建',
+        narrowed
+            ? context.l10n.noMatchingInCat(_def.label)
+            : context.l10n.noneYetInCat(_def.label),
+        action: narrowed
+            ? null
+            : (
+                context.l10n.newInCat(_def.label),
+                () => widget.host._openNew(_cat),
+              ),
       );
     }
     // 按作者排序:整个 scope 改成一个作者一栏(我的这边同理 —— 自建的归自己
@@ -880,24 +1120,30 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
       for (final e in list)
         if (e.origin == TagOrigin.favorited) e,
     ];
+    // 只有一组、条数又已经写在分段上时不出区头
+    final headed = (mine.isNotEmpty && fav.isNotEmpty) || !_def.hasPublic;
     final groups = <_Group>[
       if (mine.isNotEmpty)
         (
-          header: _sectionHeader(
-            Icons.favorite,
-            '我的${_def.label}',
-            mine.length,
-          ),
+          header: headed
+              ? _sectionHeader(
+                  Icons.favorite,
+                  context.l10n.myInCat(_def.label),
+                  mine.length,
+                )
+              : null,
           items: mine,
         ),
       if (fav.isNotEmpty)
         (
-          header: _sectionHeader(
-            Icons.star_rounded,
-            '收藏的${_def.label}',
-            fav.length,
-            muted: true,
-          ),
+          header: headed
+              ? _sectionHeader(
+                  Icons.star_rounded,
+                  context.l10n.savedInCat(_def.label),
+                  fav.length,
+                  muted: true,
+                )
+              : null,
           items: fav,
         ),
     ];
@@ -928,20 +1174,12 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
         (_) => _SkeletonGrid(aspect: _cardAspect, cols: gridColumns),
       ),
       error: (e, _) {
-        // 会话过期后端回 401/403,与无会话同样给「去授权」出口,
+        // 会话过期后端回 401/403,与无会话同样按暂未开放显示,
         // 别让人困在「重试永远失败」里。
         final needBot =
             (e is StateError && e.message == 'need-bot') ||
             (e is BackendException && (e.status == 401 || e.status == 403));
-        if (needBot) {
-          return _empty(
-            '公共库需要 Bot 授权',
-            action: (
-              '去授权',
-              () => ref.read(shellIndexProvider.notifier).select(kTabProfile),
-            ),
-          );
-        }
+        if (needBot) return _empty(context.l10n.publicLibUnavailable);
         return _empty('公共库加载失败', action: ('重试', _reloadPublic));
       },
       data: (all) {
@@ -966,16 +1204,7 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
         }
         final groups = _sortMode == TagSort.author
             ? _authorGroups(list)
-            : <_Group>[
-                (
-                  header: _sectionHeader(
-                    Icons.public,
-                    '公共${_def.label}',
-                    list.length,
-                  ),
-                  items: list,
-                ),
-              ];
+            : <_Group>[(header: null, items: list)];
         return RefreshIndicator(
           onRefresh: () async => _reloadPublic(),
           child: _railWrap(groups, _pubScroll, _grid(groups, _pubScroll, true)),
@@ -1042,32 +1271,37 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
     final color = muted ? scheme.onSurfaceVariant : scheme.primary;
     return SizedBox(
       height: 32,
-      child: Row(
-        children: [
-          Icon(icon, size: 15, color: color),
-          const SizedBox(width: 6),
-          // 作者栏的标题是 `昵称(QQ 号)`,可以很长:截断,别把分隔线顶出行外
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: context.texts.labelLarge!.copyWith(
-                fontWeight: FontWeight.w700,
-                color: color,
+      child: LayoutBuilder(
+        builder: (context, c) => Row(
+          children: [
+            Icon(icon, size: 15, color: color),
+            const SizedBox(width: 6),
+            // 作者栏的标题是 `昵称(QQ 号)`,可以很长:最多占七成,截断。
+            // 不用 Flexible:它和后面 Expanded 的分隔线按 1:1 分余量,
+            // 标题用不完的那一半就空着,线只画到一半
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: c.maxWidth * .7),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.texts.labelLarge!.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: color,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            '$count',
-            style: context.texts.labelMedium!.copyWith(
-              color: scheme.onSurfaceVariant,
+            const SizedBox(width: 6),
+            Text(
+              '$count',
+              style: context.texts.labelMedium!.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
             ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Divider(color: scheme.outlineVariant, height: 1)),
-        ],
+            const SizedBox(width: 10),
+            Expanded(child: Divider(color: scheme.outlineVariant, height: 1)),
+          ],
+        ),
       ),
     );
   }
@@ -1088,7 +1322,11 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
           ),
           if (action != null) ...[
             const SizedBox(height: 10),
-            FilledButton.tonal(onPressed: action.$2, child: Text(action.$1)),
+            FilledButton.tonal(
+              onPressed: action.$2,
+              style: context.pageTonalStyle,
+              child: Text(action.$1),
+            ),
           ],
         ],
       ),
@@ -1098,6 +1336,13 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
   // ---- 网格 + 字母导航 ----
 
   static const _headerH = 32.0;
+
+  /// 没区头的那组离上面一行的距离。
+  static const _headlessTop = 6.0;
+
+  /// 一组网格之前占的高度(区头 + 间距)。
+  static double _groupLead(_Group g) =>
+      g.header == null ? _headlessTop : 2 + _headerH + 8;
 
   /// 卡片 = 预览图比例:cover 下整图完整铺满、不裁切。
   double get _cardAspect => _def.previewAspect;
@@ -1121,12 +1366,18 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
         physics: pinchPhysics(const AlwaysScrollableScrollPhysics()),
         slivers: [
           for (final g in groups) ...[
+            if (g.header case final header?)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(_kEdge, 2, _kEdge, 0),
+                sliver: SliverToBoxAdapter(child: header),
+              ),
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(_kEdge, 2, _kEdge, 0),
-              sliver: SliverToBoxAdapter(child: g.header),
-            ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 16),
+              padding: EdgeInsets.fromLTRB(
+                _kEdge,
+                g.header == null ? _headlessTop : 8,
+                _kEdge,
+                16,
+              ),
               sliver: SliverGrid(
                 gridDelegate: zoomGridDelegate(
                   (n) => SliverGridDelegateWithFixedCrossAxisCount(
@@ -1143,29 +1394,19 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
                       isPublic &&
                       e.mosaic &&
                       !_revealed.contains(_revealKey(e));
+                  final preview = tagPreviewOf(e, pubPreview);
                   return TagCard(
                     key: ValueKey(e.id),
                     entry: e,
-                    previewUrl: tagPreviewOf(e, pubPreview),
+                    previewUrl: preview,
                     decodeWidth: decodeW,
                     selected: _sel.contains(e.id),
-                    isPublic: isPublic,
+                    showCheck: _sel.isNotEmpty,
                     mosaic: masked,
-                    collected:
-                        isPublic &&
-                        ref
-                            .read(tagLibraryProvider.notifier)
-                            .isCollected(
-                              _cat,
-                              publicId: e.publicId,
-                              name: e.name,
-                            ),
                     onTap: masked
                         ? () => setState(() => _revealed.add(_revealKey(e)))
-                        : () => _toggle(e),
-                    onLongPress: () => showTagDetailSheet(context, e),
-                    onCollect: isPublic ? () => _collect(e) : null,
-                    onMenu: isPublic ? null : (v) => _cardMenu(v, e),
+                        : () => widget.host._toggle(_cat, e),
+                    onLift: (r) => _lift(e, r, preview, isPublic, masked),
                   );
                 }, childCount: g.items.length),
               ),
@@ -1177,11 +1418,14 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
   }
 
   /// 画风分类包一层右缘字母导航。**只在按编号排时**有:换成时间/作者以后
-  /// 列表不再是字母序,字母条跳过去就是错位。
+  /// 列表不再是字母序,字母条跳过去就是错位。没有字母条的列表挂快速滚动把手
+  /// (公共画风除外)。
   Widget _railWrap(List<_Group> groups, ScrollController ctrl, Widget child) {
     final total = groups.fold(0, (n, g) => n + g.items.length);
     if (!_def.alphabetRail || _sortMode != TagSort.number || total < 12) {
-      return child;
+      final publicArtist =
+          _cat == TagCategory.artist && identical(ctrl, _pubScroll);
+      return publicArtist ? child : FastScrollHandle(child: child);
     }
     // 用 Set 去重:'#' 桶(数字开头排最前、CJK 排最后)可能不相邻,
     // 只留首次出现,跳转恒到首个。
@@ -1219,166 +1463,45 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
       final i = g.items.indexWhere((e) => letterOfName(e.name) == l);
       final rows = (g.items.length + cols - 1) ~/ cols;
       if (i >= 0) {
-        offset += 2 + _headerH + 8 + (i ~/ cols) * rowExtent;
+        offset += _groupLead(g) + (i ~/ cols) * rowExtent;
         ctrl.jumpTo(offset.clamp(0.0, ctrl.position.maxScrollExtent));
         return;
       }
-      offset += 2 + _headerH + 8 + rows * rowExtent + 16;
+      offset += _groupLead(g) + rows * rowExtent + 16;
     }
   }
 
-  Future<void> _collect(TagEntry e) async {
-    final ok = await ref.read(tagLibraryProvider.notifier).collect(e);
+  /// 长按卡片:抬起 + 菜单。我的:编辑 / 复制 / 查看提示词 / 删除;
+  /// 公共:查看提示词 / 复制 / 收藏。
+  Future<void> _lift(
+    TagEntry e,
+    Rect from,
+    String? preview,
+    bool isPublic,
+    bool masked,
+  ) async {
+    final action = await showLiftMenu<String>(
+      context,
+      from: from,
+      aspect: _cardAspect,
+      preview: TagCardPreview(url: preview, name: e.name, mosaic: masked),
+      actions: [
+        if (!isPublic)
+          (icon: Icons.edit_outlined, label: context.l10n.edit, value: 'edit'),
+        (icon: Icons.notes, label: context.l10n.viewPrompt, value: 'detail'),
+        (icon: Icons.copy, label: context.l10n.copyPrompt, value: 'copy'),
+        if (isPublic)
+          (icon: Icons.favorite_border, label: '收藏', value: 'collect'),
+      ],
+      danger: isPublic
+          ? null
+          : (
+              icon: Icons.delete_outline,
+              label: context.l10n.delete,
+              value: 'delete',
+            ),
+    );
     if (!mounted) return;
-    hintSnack(
-      context,
-      ok ? '已收藏到「我的」' : '已经收藏过了',
-      icon: ok ? Icons.favorite : Icons.info_outline,
-    );
-  }
-
-  // ---- 批量操作(底栏第一层) ----
-
-  Future<void> _runBatch(Future<void> Function() op) async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    try {
-      await op();
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  /// 批量贴标签:选一个标签(可现场新建)并入所有选中条目。
-  Future<void> _batchTag(TagLibraryState lib) async {
-    final entries = _resolveSelected(lib);
-    if (entries.isEmpty) return;
-    final tag = await pickTagSheet(context, ref, _cat);
-    if (tag == null || !mounted) return;
-    await _runBatch(() async {
-      final notifier = ref.read(tagLibraryProvider.notifier);
-      await notifier.addPoolTag(_cat, tag);
-      var n = 0;
-      for (final e in entries) {
-        if (e.tags.contains(tag)) continue;
-        await notifier.upsert(e.copyWith(tags: [...e.tags, tag]..sort()));
-        n++;
-      }
-      if (mounted) {
-        hintSnack(context, '已给 $n 项加上「$tag」', icon: Icons.sell_outlined);
-      }
-    });
-  }
-
-  Future<void> _batchDelete(TagLibraryState lib) =>
-      _deleteEntries(_resolveSelected(lib));
-
-  /// 删除条目:已发布的(created + publicId)连同公共库条目一并删。
-  ///
-  /// 卡片菜单和多选底栏走同一条 —— 早先卡片菜单只删本地、文案还恒写「仅删除
-  /// 本地条目」,已发布的条目从库里消失、公共库那份却还挂着,之后连管理入口
-  /// 都没有了。
-  Future<void> _deleteEntries(List<TagEntry> entries) async {
-    if (entries.isEmpty) return;
-    // 三种来源三种后果(对齐 web 桌面端管理器的单卡菜单):
-    //   created  发布过的 → 公共库条目 + 本地副本一起删
-    //   favorited 收藏来的 → 只丢自己这份副本,公共库原作不动
-    //   local     纯本地的 → 就是删本地
-    final published = [
-      for (final e in entries)
-        if (e.origin == TagOrigin.created && e.publicId != null) e,
-    ];
-    final favorited = [
-      for (final e in entries)
-        if (e.origin == TagOrigin.favorited) e,
-    ];
-    final localOnly = entries.length - published.length - favorited.length;
-    final one = entries.length == 1 ? entries.first : null;
-
-    final String title, message;
-    if (one != null) {
-      if (published.isNotEmpty) {
-        title = '删除「${one.name}」?';
-        message = '将彻底删除公共库条目与本地副本,不可恢复。';
-      } else if (favorited.isNotEmpty) {
-        title = '删除收藏?';
-        message = '将从本地移除「${one.name}」,公共库原作不受影响。';
-      } else {
-        title = '删除「${one.name}」?';
-        message = '仅删除本地条目,不可恢复。';
-      }
-    } else {
-      title = '删除 ${entries.length} 项?';
-      final lines = [
-        if (published.isNotEmpty) '· 你发布的 ${published.length} 项:连同公共库条目一起删',
-        if (favorited.isNotEmpty) '· 收藏的 ${favorited.length} 项:只移除本地副本,原作不动',
-        if (localOnly > 0) '· 本地的 $localOnly 项:仅删除本地',
-      ];
-      message = '${lines.join('\n')}\n\n不可恢复。';
-    }
-    final ok = await confirmDialog(
-      context,
-      title: title,
-      message: message,
-      confirmLabel: '删除',
-    );
-    if (!ok || !mounted) return;
-    await _runBatch(() async {
-      final notifier = ref.read(tagLibraryProvider.notifier);
-      final client = ref.read(backendClientProvider);
-      final session = ref.read(botSessionProvider).value;
-      var done = 0, failed = 0;
-      for (final e in entries) {
-        try {
-          if (e.origin == TagOrigin.created &&
-              e.publicId != null &&
-              session != null) {
-            if (_cat == TagCategory.character) {
-              await client.deletePublicOc(session.sessionId, e.publicId!);
-            } else {
-              await client.deletePublicArtist(session.sessionId, e.publicId!);
-            }
-          }
-          await notifier.remove(e.id);
-          done++;
-        } catch (_) {
-          failed++;
-        }
-      }
-      if (published.isNotEmpty) ref.invalidate(publicTagsProvider(_cat));
-      if (!mounted) return;
-      setState(() => _sel.clear());
-      hintSnack(
-        context,
-        failed > 0
-            ? '已删除 $done 项,$failed 项失败'
-            : (one != null ? '已删除' : '已删除 $done 项'),
-        icon: Icons.delete_outline,
-      );
-    });
-  }
-
-  /// 批量收藏(公共库 scope)。
-  Future<void> _batchCollect(TagLibraryState lib) async {
-    final entries = _resolveSelected(lib);
-    if (entries.isEmpty) return;
-    await _runBatch(() async {
-      final notifier = ref.read(tagLibraryProvider.notifier);
-      var added = 0;
-      for (final e in entries) {
-        if (await notifier.collect(e)) added++;
-      }
-      if (!mounted) return;
-      setState(() => _sel.clear());
-      hintSnack(
-        context,
-        added == entries.length ? '已收藏 $added 项' : '已收藏 $added 项(其余已在库中)',
-        icon: Icons.favorite,
-      );
-    });
-  }
-
-  Future<void> _cardMenu(String action, TagEntry e) async {
     switch (action) {
       case 'edit':
         unawaited(
@@ -1386,131 +1509,40 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
             context,
           ).push(sharedAxisRoute(TagEditorPage(cat: _cat, edit: e))),
         );
+      case 'detail':
+        unawaited(showTagDetailSheet(context, e));
       case 'copy':
         await Clipboard.setData(ClipboardData(text: e.positive));
-        if (mounted) hintSnack(context, '已复制提示词', icon: Icons.copy);
+        if (mounted) {
+          hintSnack(context, context.l10n.promptCopied, icon: Icons.copy);
+        }
+      case 'collect':
+        await widget.host._collect(e);
       case 'delete':
-        await _deleteEntries([e]);
+        await widget.host._deleteEntries([e]);
     }
   }
+}
 
-  // ---- 底部操作条 ----
+/// 让 PageView 里的页离屏后也留着。
+class _KeepAlive extends StatefulWidget {
+  const _KeepAlive({super.key, required this.child});
 
-  /// 角色分类的动作:一体式分段胶囊 —— 左「主提示词」右「加入角色 N」,
-  /// 同一主色底,中间发丝分隔,整体一颗药丸。
-  Widget _splitAction(ColorScheme scheme, TagLibraryState lib, int n) {
-    final bg = scheme.primary;
-    final fg = scheme.onPrimary;
-    Widget seg({
-      required int flex,
-      required IconData icon,
-      required String label,
-      required VoidCallback onTap,
-    }) => Expanded(
-      flex: flex,
-      child: Material(
-        color: bg,
-        child: InkWell(
-          onTap: onTap,
-          child: Center(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 17, color: fg),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.texts.labelLarge!.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: fg,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  final Widget child;
 
-    return SizedBox(
-      height: kSelectionActionHeight,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(kSelectionActionRadius),
-        child: Row(
-          children: [
-            seg(
-              flex: 5,
-              icon: Icons.bolt_outlined,
-              label: '主提示词',
-              onTap: () => _confirmToPrompt(lib),
-            ),
-            Container(width: 1.5, color: scheme.surfaceContainer),
-            seg(
-              flex: 6,
-              icon: Icons.person_add_alt,
-              label: '加入角色',
-              onTap: () => _confirmAsCharacters(lib),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  @override
+  State<_KeepAlive> createState() => _KeepAliveState();
+}
 
-  /// 角色模块对当前模型是否可见 —— 决定「加入角色」这个去处存不存在。
-  /// anima 下 NAI 四件套整组收走(角色卡都不渲染),此时加进去的角色既不进
-  /// 载荷也看不见,只会把提示词计数顶大,是个纯幽灵动作,故收起按钮。
-  bool get _charModuleOn {
-    final model = ref.watch(generateProvider.select((s) => s.params.model));
-    final ms = ref.watch(genModulesProvider).value ?? const GenModuleSettings();
-    return ms.isVisibleFor(GenModule.character, model);
-  }
+class _KeepAliveState extends State<_KeepAlive>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
 
-  Widget _selectionBar(ColorScheme scheme, TagLibraryState lib) {
-    final n = _sel.length;
-    final publicScope = _def.hasPublic && _tabIndex == 1;
-    return SelectionBar(
-      visible: n > 0,
-      // shell 里的 tab 页,底部安全区由导航栏兜着
-      safeArea: false,
-      onClear: () => setState(() => _sel.clear()),
-      actions: [
-        if (publicScope)
-          SelectionPill(
-            icon: Icons.favorite_border,
-            label: '收藏',
-            onTap: _busy ? null : () => _batchCollect(lib),
-          )
-        else
-          SelectionPill(
-            icon: Icons.sell_outlined,
-            label: '标签',
-            onTap: _busy ? null : () => _batchTag(lib),
-          ),
-      ],
-      destructive: publicScope
-          ? null
-          : SelectionPill(
-              icon: Icons.delete_outline,
-              label: '删除',
-              color: scheme.error,
-              onTap: _busy ? null : () => _batchDelete(lib),
-            ),
-      // 角色分类有两个去处,主动作是一体式分段按钮;角色模块不可见时
-      // (anima 等)只剩「主提示词」一个去处,退回普通整条按钮
-      primary: _cat == TagCategory.character && _charModuleOn
-          ? _splitAction(scheme, lib, n)
-          : FilledButton.icon(
-              onPressed: () => _confirmToPrompt(lib),
-              icon: const Icon(Icons.check, size: 18),
-              label: Text('确认选择 ($n)'),
-              style: selectionPrimaryStyle(),
-            ),
-    );
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }
 
@@ -1545,7 +1577,7 @@ class _SkeletonGridState extends State<_SkeletonGrid>
     final scheme = context.scheme;
     return GridView.count(
       crossAxisCount: widget.cols,
-      padding: const EdgeInsets.fromLTRB(_kEdge, 42, _kEdge, 16),
+      padding: const EdgeInsets.fromLTRB(_kEdge, 6, _kEdge, 16),
       mainAxisSpacing: _gap,
       crossAxisSpacing: _gap,
       childAspectRatio: widget.aspect,
@@ -1559,7 +1591,7 @@ class _SkeletonGridState extends State<_SkeletonGrid>
             ).animate(CurvedAnimation(parent: _c, curve: Curves.easeInOut)),
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: scheme.surfaceContainerHighest,
+                color: context.raisedFill(scheme.surfaceContainerHighest),
                 borderRadius: BorderRadius.circular(16),
               ),
             ),
@@ -1665,7 +1697,7 @@ class _LetterRailState extends State<_LetterRail>
                           height: slot * n + vPad,
                           alignment: Alignment.center,
                           decoration: BoxDecoration(
-                            color: scheme.surfaceContainerHigh.withValues(
+                            color: context.pageControlFill.withValues(
                               alpha: .55 + .41 * r,
                             ),
                             borderRadius: BorderRadius.circular(_railW / 2),

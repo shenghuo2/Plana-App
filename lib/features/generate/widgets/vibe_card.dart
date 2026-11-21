@@ -11,10 +11,12 @@ import '../../../core/util/image_pick.dart';
 import '../../vibe_library/vibe_import.dart' show ingestVibeFiles;
 import '../../vibe_library/vibe_library.dart';
 import '../../vibe_library/vibe_library_page.dart';
+import '../canvas_state.dart';
 import '../generate_state.dart';
 import '../models.dart';
 import 'common.dart';
 import 'section_card.dart';
+import '../../../l10n/l10n.dart';
 
 /// 顶层函数:在后台 isolate 算图片内容哈希(sha256 hex),避免大图卡主线程。
 String _sha256Hex(Uint8List bytes) => sha256.convert(bytes).toString();
@@ -34,21 +36,26 @@ class _VibeCardState extends ConsumerState<VibeCard> {
   String? _selectedId;
 
   Future<void> _onAdd() async {
+    final canvasId = ref.read(canvasWorkspaceProvider).activeId;
     final picked = await pickImagesOrFiles(context);
     if (picked.isEmpty || !mounted) return;
     // 图库里改走「从文件选」的:不限扩展名,vibe 文件也可能在里面
-    if (picked.files.isNotEmpty) return _addFiles(picked.files);
-    await _addImages(picked.images);
+    if (picked.files.isNotEmpty) return _addFiles(picked.files, canvasId);
+    await _addImages(picked.images, canvasId);
   }
 
-  Future<void> _addImages(List<PickedImage> files) async {
+  /// 选图到加进来之间切走了画布:没加的就不加了(图已进 Vibe 库)。
+  bool _left(String canvasId) =>
+      ref.read(canvasWorkspaceProvider).activeId != canvasId;
+
+  Future<void> _addImages(List<PickedImage> files, String canvasId) async {
     // 互斥态在加图前取一次:加 Vibe 会顺手停掉角色参考
     final hadCharRefs = ref.read(generateProvider).enabledCharRefs > 0;
     String? lastId;
     for (final f in files) {
       final bytes = f.bytes;
       final hash = await compute(_sha256Hex, bytes); // 后台算内容哈希
-      if (!mounted) return;
+      if (!mounted || _left(canvasId)) return;
       // 顺手入库(同图去重;重启后可从 Vibe 库找回,编码缓存互通不多扣点)
       String? sourceId;
       try {
@@ -59,7 +66,7 @@ class _VibeCardState extends ConsumerState<VibeCard> {
       } catch (_) {
         // 入库失败不影响本次使用
       }
-      if (!mounted) return;
+      if (!mounted || _left(canvasId)) return;
       final id = ref
           .read(generateProvider.notifier)
           .addVibe(
@@ -77,16 +84,16 @@ class _VibeCardState extends ConsumerState<VibeCard> {
 
   /// 从文件浏览器选来的:图片按参考图入库,vibe 文件按 vibe 解析(整包里的多条
   /// 一并加进来),都先落 Vibe 库再取用 —— 纯编码 vibe 没有图,只能这么走。
-  Future<void> _addFiles(List<PlatformFile> files) async {
+  Future<void> _addFiles(List<PlatformFile> files, String canvasId) async {
     final lib = ref.read(vibeLibraryProvider.notifier);
     final got = await ingestVibeFiles(lib, files);
-    if (!mounted) return;
+    if (!mounted || _left(canvasId)) return;
     final hadCharRefs = ref.read(generateProvider).enabledCharRefs > 0;
     var failed = got.failed;
     String? lastId;
     for (final e in got.entries) {
       final data = await lib.loadForGenerate(e);
-      if (!mounted) return;
+      if (!mounted || _left(canvasId)) return;
       if (data == null) {
         failed++; // 落库了但当前拿不出可生成内容(如无任何编码的纯编码条目)
         continue;
@@ -108,9 +115,17 @@ class _VibeCardState extends ConsumerState<VibeCard> {
     }
     // 提示只留一条(新提示顶掉旧的):有失败先说失败,否则才提互斥
     if (failed > 0) {
-      hintSnack(context, '$failed 个文件无法导入', icon: Icons.error_outline);
+      hintSnack(
+        context,
+        context.l10n.filesImportFailed(failed),
+        icon: Icons.error_outline,
+      );
     } else if (lastId == null) {
-      hintSnack(context, '没有可导入的内容', icon: Icons.error_outline);
+      hintSnack(
+        context,
+        context.l10n.nothingToImport,
+        icon: Icons.error_outline,
+      );
     } else if (hadCharRefs) {
       _mutexHint();
     }
@@ -125,8 +140,11 @@ class _VibeCardState extends ConsumerState<VibeCard> {
   }
 
   /// 互斥切换提示:启用/加入 Vibe 导致角色参考被暂停时,弹一次 toast。
-  void _mutexHint() =>
-      hintSnack(context, '与角色参考互斥,已暂停角色参考', icon: Icons.swap_horiz);
+  void _mutexHint() => hintSnack(
+    context,
+    context.l10n.refMutexCharRefPaused,
+    icon: Icons.swap_horiz,
+  );
 
   /// 删除某张,并把选中态平移到相邻项
   void _removeVibe(String id) {
@@ -161,16 +179,30 @@ class _VibeCardState extends ConsumerState<VibeCard> {
       }
     }
     selected ??= vibes.isNotEmpty ? vibes.first : null;
+    // 挂着遮罩时这组 Vibe 不发(见 withoutInpaintVibes),卡片照常可编辑
+    final idle = state.inpaint != null && vibes.isNotEmpty;
 
     return SectionCard(
       icon: Icons.palette_outlined,
-      title: 'Vibe Transfer',
+      title: context.l10n.vibeTransfer,
       reorderIndex: widget.reorderIndex,
       badge: vibes.isEmpty ? null : CountBadge('${vibes.length}'),
+      muted: idle,
+      inline: [
+        if (idle)
+          Flexible(
+            child: Text(
+              context.l10n.inactiveWhenInpainting,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.texts.labelSmall!.copyWith(color: scheme.outline),
+            ),
+          ),
+      ],
       actions: [
         RoundIconBtn(
           Icons.grid_view,
-          tooltip: 'Vibe 库',
+          tooltip: context.l10n.vibeLibrary,
           color: scheme.onSurfaceVariant,
           onTap: () => Navigator.of(
             context,
@@ -179,7 +211,7 @@ class _VibeCardState extends ConsumerState<VibeCard> {
         RoundIconBtn(
           Icons.add,
           // 与角色参考卡的同位按钮区分:两者互斥,tooltip 一样会让人分不清点了哪个
-          tooltip: '导入 Vibe 参考图',
+          tooltip: context.l10n.importVibe,
           color: scheme.primary,
           onTap: _onAdd,
         ),
@@ -221,7 +253,7 @@ class _VibeCardState extends ConsumerState<VibeCard> {
               children: [
                 Expanded(
                   child: HelpLabel(
-                    text: '均衡强度',
+                    text: context.l10n.normalizeStrength,
                     help: Help.normalizeVibe,
                     style: context.texts.bodySmall!.copyWith(
                       color: scheme.onSurface,
@@ -280,7 +312,7 @@ class _VibeDetail extends ConsumerWidget {
         ),
         const SizedBox(height: 14),
         LiveParamSlider(
-          label: 'Strength 参考强度',
+          label: context.l10n.referenceStrength,
           help: Help.vibeStrength,
           value: vibe.strength,
           divisions: 100, // step 0.01(对齐 web)
@@ -294,7 +326,7 @@ class _VibeDetail extends ConsumerWidget {
           Opacity(
             opacity: .7,
             child: ParamSlider(
-              label: 'Info Extracted 信息提取(随编码固定)',
+              label: context.l10n.infoExtractedFixed,
               help: Help.infoExtracted,
               value: vibe.infoExtracted,
               divisions: 100,
@@ -303,7 +335,7 @@ class _VibeDetail extends ConsumerWidget {
           )
         else
           LiveParamSlider(
-            label: 'Info Extracted 信息提取',
+            label: context.l10n.infoExtracted,
             help: Help.infoExtracted,
             value: vibe.infoExtracted,
             divisions: 100,

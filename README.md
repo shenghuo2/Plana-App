@@ -4,15 +4,17 @@
 
 # Plana App
 
-**NovelAI 第三方 Flutter 客户端** —— 支持 Android、macOS 与 Windows
+**NovelAI 第三方 Android 客户端** —— 更舒适的 AI 绘图移动创作端
 
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Fork](https://img.shields.io/badge/fork-shenghuo2%2FPlana--App-181717?logo=github)](https://github.com/shenghuo2/Plana-App)
 [![Upstream](https://img.shields.io/badge/upstream-mc5024%2FPlana--App-555?logo=github)](https://github.com/mc5024/Plana-App)
 [![Android](https://img.shields.io/badge/Android-7.0%2B-3ddc84?logo=android&logoColor=white)](#构建)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](#桌面端)
-[![Windows](https://img.shields.io/badge/Windows-10%2B-0078d4?logo=windows&logoColor=white)](#桌面端)
 [![Flutter](https://img.shields.io/badge/built%20with-Flutter-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
+
+[![下载最新版 APK](https://img.shields.io/github/v/release/shenghuo2/Plana-App?label=%E4%B8%8B%E8%BD%BD%20APK&style=for-the-badge&logo=android&logoColor=white&color=3ddc84)](https://github.com/shenghuo2/Plana-App/releases/latest)
+
+**简体中文** · [English](README.en.md)
 
 </div>
 
@@ -22,10 +24,9 @@
 > 在标准 Android 安装机制下,两者无法相互覆盖安装或升级。需要切换时请先备份数据再卸载旧应用;
 > 卸载应用会删除其本地应用数据。
 
-本仓库是 [mc5024/Plana-App](https://github.com/mc5024/Plana-App) 的定制分支。
-当前版本增加了向自建图片管理服务推送图库原图的能力,并提供 macOS 与 Windows
-实验性构建。Android 定制包只检查本 fork 的同签名 Release,不会提示或下载
-无法直接覆盖安装的上游官方版本。
+本仓库是 [mc5024/Plana-App](https://github.com/mc5024/Plana-App) 的 Android 定制分支,
+在同步上游功能的同时集成以下特性(桌面端 `desktop-platforms` 已移至独立仓库维护,本仓库仅构建与发布 Android APK):
+Android 定制包只检查本 fork 的同签名 Release,不会提示或下载无法直接覆盖安装的上游官方版本。
 
 ## 亮点
 
@@ -49,8 +50,6 @@
 
 - **应用内更新** Android 冷启动会按 24 小时间隔静默检查本 fork 的 Release,也可在
   「我的 → 关于 → 检查更新」手动触发;APK 在应用内下载并校验后由系统安装器完成覆盖安装
-
-- **桌面端** macOS 与 Windows 使用原生文件选择器、系统安全存储与图片图库,宽窗口自动切换为侧边导航
 
 - **AI 助手** 支持在应用内撰写和改写提示词、解释参数,可在外观设置中隐藏导航入口
 
@@ -104,7 +103,7 @@ NAI 网页端的常规能力 —— 多角色与位置、Vibe Transfer、角色�
 
 | 计划 | 说明 | 阶段 |
 |---|---|---|
-| **多平台适配** | macOS / Windows 已提供实验性构建;iOS 计划中 | 进行中 |
+| **多平台适配** | iOS 计划中;桌面端(`desktop-platforms`)已移至独立仓库维护 | 计划中 |
 | **内置图像编辑** | 接入图像编辑模型,直接在应用内改图,不必导出到其他工具 | 远期 |
 | **ComfyUI 连接器** | 接入自建 ComfyUI 作为出图后端 | 远期 |
 
@@ -127,37 +126,6 @@ flutter build apk --release --target-platform android-arm64
 ```
 
 产物为 `build/app/outputs/apk/release/Plana-<版本>-arm64-v8a.apk`,仅出 arm64-v8a。
-
-### 桌面端
-
-Windows 构建需要 Windows 10/11、Visual Studio 2022 的“使用 C++ 的桌面开发”工作负载
-和 C++ ATL;产物必须连同同目录的 DLL 与 `data/` 一起分发,不能只复制 EXE。
-
-```powershell
-flutter pub get --enforce-lockfile
-flutter build windows --release --no-pub
-```
-
-完整 Windows 目录位于 `build/windows/x64/runner/Release/`,入口是 `Plana.exe`。
-
-macOS 构建需要 macOS 14 以上和 Xcode。Release 构建采用非沙箱模式,凭据写入当前
-用户的 macOS 登录钥匙串,不依赖 Keychain Sharing entitlement 或 Apple 开发者证书。
-
-```bash
-flutter pub get --enforce-lockfile
-flutter build macos --release --no-pub
-hdiutil create -volname "Plana App" \
-  -srcfolder "build/macos/Build/Products/Release/Plana App.app" \
-  -ov -format UDZO Plana-macOS.dmg
-```
-
-`release/*` 分支的 GitHub Actions 会在原生 Windows 与 macOS runner
-上执行检查并生成 ZIP / DMG artifact。当前 macOS artifact 名为
-`Plana-macOS-ad-hoc`,会移除需要 Apple 证书链的沙箱 entitlement,并在打包时实际验证
-登录钥匙串的写入、读取和删除。它没有 Apple Developer ID 签名和公证,首次打开仍会
-触发 Gatekeeper,但 Token 与 Bot 会话可以正常安全保存。若需消除系统的未认证开发者
-警告,仍只能使用 Developer ID Application 签名并完成 Apple 公证。Windows 自动产物
-同样未使用代码签名,首次打开可能触发 SmartScreen。
 
 ```bash
 flutter analyze && flutter test
@@ -182,11 +150,11 @@ flutter analyze && flutter test
 `main` 只保存已经发布的正式稳定版,其 push 也不自动创建 tag 或 Release。
 固定签名证书不匹配时构建立即终止,不会产出待发布 APK。
 
-`release/**` 分支用于整合上游主线、云存储推送、应用内更新和桌面端适配。每个 release
+`release/**` 分支用于整合上游主线、云存储推送、应用内更新与代理适配。每个 release
 分支都必须包含 `feature/cloud-storage-push` 与 `feature/in-app-updater`;Android 工作流会在
 构建前校验两项特性的提交历史、fork 更新源和关键实现文件,缺少任一项都会终止。推送此类
-分支会生成签名 APK 与 macOS / Windows Actions artifact,但不自动创建 tag 或 Release。
-确认三端产物、版本号、签名和更新流程后,从已验证提交手动创建 tag 并发布 GitHub
+分支会生成签名 APK Actions artifact,但不自动创建 tag 或 Release(桌面端构建已从本仓库退役)。
+确认产物、版本号、签名和更新流程后,从已验证提交手动创建 tag 并发布 GitHub
 Release。只有非草稿、非 prerelease 的正式版才通过普通 merge 进入 `main`;测试版留在
 release 分支,历史分支和 tag 保留。具体约束见 [AGENTS.md](AGENTS.md)。
 
@@ -201,7 +169,7 @@ release 分支,历史分支和 tag 保留。具体约束见 [AGENTS.md](AGENTS.m
 | [mc5024/Plana-App](https://github.com/mc5024/Plana-App) · Sora_Light | 原项目代码、产品设计与移动端实现 |
 | [Danbooru](https://danbooru.donmai.us/) | 标签体系与别名数据 |
 | [Auto-NovelAI-Refactor](https://github.com/zhulinyv/Auto-NovelAI-Refactor) · zhulinyv | 离线补全词库(`assets/danbooru.tsv`,随包分发)的标签表、热度、类目与中文译名,取自其 `danbooru_tags_full_zh.csv`(GPL-3.0) |
-| [DanbooruSearchOnline](https://github.com/SuzumiyaAkizuki/DanbooruSearchOnline) · SuzumiyaAkizuki | 增强补全的在线中文搜词、译名与一句话简介 |
+| [DanbooruSearchOnline](https://github.com/SuzumiyaAkizuki/DanbooruSearchOnline) · SuzumiyaAkizuki | 补全的在线中文搜词、译名与一句话简介 |
 | [quicktagcloud](https://novelai.quicktagcloud.com/) | 法典图鉴的全部数据(词条 / 画师串 / 合集 / 例图)。只读接入,数据不随包分发,本应用不修改也不发布法典内容,所有内容归原作者所有 |
 | [@huggingface/tokenizers](https://github.com/huggingface/tokenizers) | T5 分词器移植的参照实现 |
 | [nai5-prompting](https://github.com/Miint-Sunny/nai5-prompting) · Miint-Sunny | AI 助手预设的漫画部分(`assets/prompts/nai5.json`,随包分发)(GPL-3.0) |

@@ -7,6 +7,7 @@ import 'dart:ui' show Color;
 
 import '../../core/theme/app_theme.dart' show FixedSemantic;
 import '../generate/models.dart' show GenerateState;
+import '../../l10n/l10n.dart';
 
 /// 结果图的处理标记 —— 决定缩略图角标与画布顶部标签。
 enum ResultBadge { none, upscaled, inpaint, censored }
@@ -15,8 +16,8 @@ extension ResultBadgeX on ResultBadge {
   /// 角标短文案;none 无角标。
   String? get label => switch (this) {
     ResultBadge.upscaled => '4x',
-    ResultBadge.inpaint => '重绘',
-    ResultBadge.censored => '打码',
+    ResultBadge.inpaint => l10nNow.inpaint,
+    ResultBadge.censored => l10nNow.tabCensor,
     ResultBadge.none => null,
   };
 
@@ -28,6 +29,16 @@ extension ResultBadgeX on ResultBadge {
     ResultBadge.censored => FixedSemantic.censor,
     ResultBadge.none => const Color(0x00000000),
   };
+}
+
+/// 回收站保留天数(按自然日算),过了就彻底删除。
+const kTrashKeepDays = 30;
+
+/// 回收站里的一张:原条目 + 移入时刻(ms epoch)。
+class TrashedImage {
+  const TrashedImage(this.image, this.deletedAt);
+  final ResultImage image;
+  final int deletedAt;
 }
 
 /// 一张生成结果。bytes/input 只是**内存缓存**——重启水合或 RAM 减负后

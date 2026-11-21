@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_skin.dart';
 import '../theme/app_theme.dart';
 import 'expand_body.dart';
+import '../../l10n/l10n.dart';
 
 /// 多选底栏(Vibe 管理器 / 角色参考图库 / 灵感页共用)。
 ///
@@ -9,6 +11,9 @@ import 'expand_body.dart';
 /// - 第一层 [actions] 靠左(打包/标签/收藏/全选…),[destructive] 靠右
 ///   —— 破坏性操作单独拉到另一头,不和常用项挤在一起误触。
 /// - 第二层「取消选择」(定宽)+ [primary] 主动作(占满剩余宽度)。
+///
+/// [compact] 时压成一行:✕ 取消 + [actions] + [destructive](都用
+/// [SelectionIconButton] 浅底圆钮)+ 占满剩余宽度的 [primary]。
 ///
 /// 尺寸基准取自灵感页:大按钮 48 高、24 圆角,底色 surfaceContainer。
 /// 没有任何选中时整条收起([visible] = false),把屏幕还给列表。
@@ -21,6 +26,7 @@ class SelectionBar extends StatelessWidget {
     this.actions = const [],
     this.destructive,
     this.safeArea = true,
+    this.compact = false,
   });
 
   /// 展开条件。一般是「选中数 > 0」,但页面若有「退出即丢弃」的语义,
@@ -43,52 +49,81 @@ class SelectionBar extends StatelessWidget {
   /// 独立路由页要自己垫底部安全区;shell 内的 tab 页由导航栏兜着,传 false。
   final bool safeArea;
 
+  /// 一行版式(见类注释)。
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     final firstRow = actions.isNotEmpty || destructive != null;
-    Widget content = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (firstRow) ...[
-            Row(
+    Widget content = compact
+        ? Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: Row(
               children: [
-                for (var i = 0; i < actions.length; i++) ...[
-                  if (i > 0) const SizedBox(width: 8),
-                  actions[i],
+                SelectionIconButton(
+                  icon: Icons.close,
+                  tooltip: context.l10n.clearSelection,
+                  onTap: onClear,
+                ),
+                for (final a in [...actions, ?destructive]) ...[
+                  const SizedBox(width: 8),
+                  a,
                 ],
-                const Spacer(),
-                ?destructive,
+                const SizedBox(width: 10),
+                Expanded(child: primary),
               ],
             ),
-            const SizedBox(height: 10),
-          ],
-          Row(
-            children: [
-              OutlinedButton(
-                onPressed: onClear,
-                style: OutlinedButton.styleFrom(
-                  minimumSize: const Size(112, kSelectionActionHeight),
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(kSelectionActionRadius),
+          )
+        : Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (firstRow) ...[
+                  Row(
+                    children: [
+                      for (var i = 0; i < actions.length; i++) ...[
+                        if (i > 0) const SizedBox(width: 8),
+                        actions[i],
+                      ],
+                      const Spacer(),
+                      ?destructive,
+                    ],
                   ),
+                  const SizedBox(height: 10),
+                ],
+                Row(
+                  children: [
+                    OutlinedButton(
+                      onPressed: onClear,
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(112, kSelectionActionHeight),
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(
+                            kSelectionActionRadius,
+                          ),
+                        ),
+                      ),
+                      child: Text(context.l10n.clearSelection),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(child: primary),
+                  ],
                 ),
-                child: const Text('取消选择'),
-              ),
-              const SizedBox(width: 10),
-              Expanded(child: primary),
-            ],
-          ),
-        ],
-      ),
-    );
+              ],
+            ),
+          );
     if (safeArea) content = SafeArea(top: false, child: content);
     return ExpandBody(
       expanded: visible,
-      child: Material(color: scheme.surfaceContainer, child: content),
+      child: Docked(
+        child: Material(
+          color: context.raisedFill(scheme.surfaceContainer),
+          child: content,
+        ),
+      ),
     );
   }
 }
@@ -149,6 +184,48 @@ class SelectionPill extends StatelessWidget {
               const SizedBox(width: 5),
               Text(label, style: context.texts.labelLarge!.copyWith(color: fg)),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 一行底栏([SelectionBar.compact])里的圆形浅底图标钮,与主动作同高。
+/// [color] 非空即破坏性配色(只染图标)。
+class SelectionIconButton extends StatelessWidget {
+  const SelectionIconButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    this.color,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final Color? color;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    final enabled = onTap != null;
+    final fg = (color ?? scheme.onSurfaceVariant).withValues(
+      alpha: enabled ? 1 : .45,
+    );
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: scheme.surfaceContainerHighest,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            width: kSelectionActionHeight,
+            height: kSelectionActionHeight,
+            child: Icon(icon, size: 21, color: fg),
           ),
         ),
       ),

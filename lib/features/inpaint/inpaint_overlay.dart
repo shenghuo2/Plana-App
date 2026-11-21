@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/store/app_stores.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/ui/param_input.dart';
 import '../generate/canvas_state.dart';
@@ -14,7 +15,8 @@ import '../generate/gen_modules.dart';
 import '../generate/generate_state.dart';
 import '../generate/models.dart';
 import '../generate/res_rules.dart' show kFreePixelThreshold;
-import '../generate/widgets/common.dart' show hintSnack;
+import '../generate/nai_request.dart' show inpaintStrengthSupported;
+import '../generate/widgets/common.dart' show LockedParam, hintSnack;
 import '../gallery/albums/album_state.dart' show gallerySaveTargetProvider;
 import '../gallery/gallery_state.dart';
 import '../gallery/models.dart' show ResultBadge;
@@ -24,6 +26,8 @@ import 'censor_infer.dart';
 import 'censor_ops.dart';
 import 'inpaint_ops.dart';
 import '../../core/util/haptics.dart';
+import '../../core/util/image_ops.dart' show ensurePng, isNaiImageFormat;
+import '../../l10n/l10n.dart';
 
 /// 内容层功能色(画在图片上,与 app 主题无关):
 /// 遮罩紫与 web 一致;裁切青取深档保证浅色底上可读。
@@ -140,7 +144,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   Offset? _cropDragFrom;
   IntRect? _crop; // 发送框(w/h 恒 64 倍数,单边 ≤ _cropMaxSide)
   double _brush = 50; // 笔刷直径(图像素),对齐 web 默认
-  double _strength = 0.7;
+  double _strength = 1;
   _SliderTarget? _slider;
   bool _showOriginal = false;
   bool _firing = false;
@@ -290,8 +294,8 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
         _img = frame.image;
         _grid = MaskGrid(frame.image.width, frame.image.height);
       });
-      _restoreMask();
       _restoreMode(frame.image);
+      _restoreMask();
       unawaited(_ac.forward());
     } catch (_) {
       if (mounted) ref.read(inpaintSessionProvider.notifier).close();
@@ -302,13 +306,36 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   ///
   /// 认人靠 [InpaintJob.sourceId]:不是同一张图就不恢复,免得把别人的遮罩套上来。
   /// 尺寸对不上(扩过图/裁过)时 [MaskGrid.decodeInto] 自己会拒,是第二道保险。
+  ///
+  /// 存的是局部重绘时,当时的发送框一起放回来,并当作用户拉过的框(只扩不缩)。
   void _restoreMask() {
     final grid = _grid;
+    final img = _img;
     final job = ref.read(generateProvider).inpaint;
     final data = job?.grid;
-    if (grid == null || data == null) return;
+    if (grid == null || img == null || data == null) return;
     if (job!.sourceId != widget.session.sourceId) return;
-    if (grid.decodeInto(data)) setState(() => _rev++);
+    if (!grid.decodeInto(data)) return;
+    IntRect? box;
+    final r = job.paste?.region;
+    if (_mode == _Mode.paint &&
+        r != null &&
+        r.x >= 0 &&
+        r.y >= 0 &&
+        r.w > 0 &&
+        r.h > 0 &&
+        r.x + r.w <= img.width &&
+        r.y + r.h <= img.height) {
+      box = r;
+    }
+    setState(() {
+      _rev++;
+      if (box != null) {
+        _cropMode = true;
+        _crop = box;
+        _cropResized = true;
+      }
+    });
   }
 
   @override
@@ -446,39 +473,39 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   /// 开,还没画就先框住半张图挡视线,框的位置跟你要改的地方也毫无关系。
   /// 按遮罩算,位置天然是对的,也不会出现"第二笔画到框外被静默丢掉"。
   ///
-  /// 单边封顶 [_cropMaxSide]:遮罩比这还大时框只能盖住其中一段。
+  /// 单边封顶 [_cropMaxSide]:一个框装不下全部涂抹(两处离得远、或铺得太大)时,
+  /// 整图发得出去就关掉局部改发整图;发不出去就留着框,保存时拦下。
   void _autoCrop() {
     // 局部框是「发送范围」,只有涂抹模式有意义 —— 打码不发送,让它自动弹出来
     // 只会拿黄框和框外 40% 暗化盖住打码预览。
     if (_mode != _Mode.paint) return;
     final img = _img, grid = _grid;
     if (img == null || grid == null) return;
-    final tight = tightCropRect(grid);
-    if (tight == null) return; // 擦空了:框留在原处,别闪
-    if (!_cropMode) {
-      // 还没开:小图本来就不用开,手动关过的也不再替他打开
-      if (_cropOptOut || img.width * img.height <= kFreePixelThreshold) return;
-      _cropMode = true;
+    // 还没开:小图本来就不用开,手动关过的也不再替他打开
+    if (!_cropMode &&
+        (_cropOptOut || img.width * img.height <= kFreePixelThreshold)) {
+      return;
     }
-    var want = alignSendRect(tight, img.width, img.height);
+    // 拉过边的框归用户:只扩不缩 —— 尊重他要的留白,同时让涂到框外的
+    // 地方也进框(发送时按框裁遮罩,框外那部分等于没画)。
     final keep = _cropResized ? _crop : null;
-    if (keep != null) {
-      // 拉过边的框归用户:只扩不缩 —— 尊重他要的留白,同时让涂到框外的
-      // 地方也进框(发送时按框裁遮罩,框外那部分等于没画)。
-      final x = math.min(keep.x, want.x);
-      final y = math.min(keep.y, want.y);
-      final r = math.max(keep.x + keep.w, want.x + want.w);
-      final b = math.max(keep.y + keep.h, want.y + want.h);
-      want = (x: x, y: y, w: r - x, h: b - y);
+    final box = cropForMask(grid, _cropMaxSide, keep: keep);
+    if (box == null) return; // 擦空了:框留在原处,别闪
+    if (grid.hasCellsOutside(box) && _wholeSendable(img)) {
+      _cropMode = false;
+      _crop = null;
+      _cropResized = false;
+      return;
     }
-    // 超过上限时:先尽量多盖遮罩,再尽量留住他拉的框
-    _crop = capSendRect(
-      want,
-      _cropMaxSide,
-      focus: maskBounds(grid),
-      keep: keep,
-    );
+    _cropMode = true;
+    _crop = box;
   }
+
+  /// 整张图能不能直接发(像素不超上限且 64 对齐)。
+  bool _wholeSendable(ui.Image img) =>
+      img.width * img.height <= _maxSendPixels &&
+      img.width % 64 == 0 &&
+      img.height % 64 == 0;
 
   void _undoOnce() {
     if (_undo.isEmpty) return;
@@ -486,6 +513,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     setState(() {
       _rev++;
       _maskTouched();
+      _autoCrop();
     });
   }
 
@@ -518,11 +546,19 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     final img = _img;
     if (img == null || _mode == m) return;
     if (_previewDst != null) {
-      hintSnack(context, '生成进行中,请稍候', icon: Icons.hourglass_top);
+      hintSnack(
+        context,
+        context.l10n.genInProgressWait,
+        icon: Icons.hourglass_top,
+      );
       return;
     }
     if (m == _Mode.expand && (img.width % 64 != 0 || img.height % 64 != 0)) {
-      hintSnack(context, '图片尺寸非 64 对齐,无法扩图', icon: Icons.straighten);
+      hintSnack(
+        context,
+        context.l10n.notAligned64Expand,
+        icon: Icons.straighten,
+      );
       return;
     }
     if (m == _Mode.censor) {
@@ -656,20 +692,13 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
       return;
     }
     final img = _img!;
-    final grid = _grid!;
-    final tight = tightCropRect(grid);
+    final box = cropForMask(_grid!, _cropMaxSide);
     setState(() {
       _cropOptOut = false;
       _cropResized = false;
       _cropMode = true;
       // 有涂抹按遮罩算框;还没涂就先给个居中框占位,落笔后自动跟上
-      _crop = tight != null
-          ? capSendRect(
-              alignSendRect(tight, img.width, img.height),
-              _cropMaxSide,
-              focus: maskBounds(grid),
-            )
-          : _defaultCrop(img.width, img.height);
+      _crop = box ?? _defaultCrop(img.width, img.height);
     });
   }
 
@@ -865,7 +894,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     if (tw * th > _maxSendPixels) {
       hintSnack(
         context,
-        '扩图后尺寸过大,请缩小扩展范围',
+        context.l10n.expandTooLarge,
         icon: Icons.photo_size_select_large,
       );
       return;
@@ -898,8 +927,6 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
           // 图没扩成功时(用户又退回来)还能接着用。
           grid: _grid?.encode(),
         ),
-        width: tw,
-        height: th,
       );
     } finally {
       if (mounted) setState(() => _firing = false);
@@ -910,24 +937,18 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   /// (对齐官网)。流式预览也跟着回到图库画布那一份,不再自己画一套。
   ///
   /// 存完直接跳创作页:主生成按钮在那儿,留在图库等于让人自己去找。
-  void _saveInto(InpaintJob job, {required int width, required int height}) {
-    // 存入会顶掉图生图底图、改分辨率:提示条上给「撤销」,整份放回存入之前
+  void _saveInto(InpaintJob job) {
+    // 存入会顶掉图生图底图:提示条上给「撤销」,整份放回存入之前
     final before = ref.read(generateProvider);
     final canvasId = ref.read(canvasWorkspaceProvider).activeId;
     final canvases = ref.read(canvasWorkspaceProvider.notifier);
-    ref
-        .read(generateProvider.notifier)
-        .setInpaint(job, width: width, height: height);
+    ref.read(generateProvider.notifier).setInpaint(job);
     Haptics.medium();
-    // 遮罩会改写生成分辨率(局部发裁切区、扩图发垫大后的画布),和图生图选底图
-    // 一个道理 —— 变了就说一声,免得回到创作页看见分辨率莫名其妙换了。
-    final resized =
-        before.params.width != width || before.params.height != height;
     hintSnack(
       context,
-      resized ? '分辨率已按重绘范围调整为 $width×$height' : '已存入重绘',
-      icon: resized ? Icons.aspect_ratio : Icons.brush,
-      actionLabel: '撤销',
+      context.l10n.savedToInpaint,
+      icon: Icons.brush,
+      actionLabel: context.l10n.undo,
       onAction: () => canvases.undoWrite(before, canvasId),
     );
     ref.read(shellIndexProvider.notifier).select(kTabCreate);
@@ -998,7 +1019,11 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
       );
       if (!mounted) return;
       if (boxes.isEmpty) {
-        hintSnack(context, '没检测到需要打码的区域', icon: Icons.search_off);
+        hintSnack(
+          context,
+          context.l10n.censorNothingFound,
+          icon: Icons.search_off,
+        );
         return;
       }
       _pushUndo(); // 预填当成一次可撤销的编辑
@@ -1007,12 +1032,18 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
       setState(() => _rev++);
       hintSnack(
         context,
-        '检测到 ${boxes.length} 处,已预填',
+        context.l10n.censorDetected(boxes.length),
         icon: Icons.auto_fix_high,
       );
       if (n == 0) return;
     } catch (e) {
-      if (mounted) hintSnack(context, '自动识别失败: $e', icon: Icons.error_outline);
+      if (mounted) {
+        hintSnack(
+          context,
+          context.l10n.censorDetectFailed('$e'),
+          icon: Icons.error_outline,
+        );
+      }
     } finally {
       if (mounted) setState(() => _detecting = false);
     }
@@ -1023,7 +1054,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     final scheme = context.scheme;
     final picked = await showModalBottomSheet<int>(
       context: context,
-      backgroundColor: scheme.surfaceContainer,
+      backgroundColor: context.raisedFill(scheme.surfaceContainer),
       showDragHandle: true,
       builder: (ctx) => SafeArea(
         child: Padding(
@@ -1032,11 +1063,11 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('打码颜色', style: ctx.texts.titleMedium),
+              Text(ctx.l10n.censorColor, style: ctx.texts.titleMedium),
               const SizedBox(height: 16),
               Row(
                 children: [
-                  for (final (c, name) in kCensorColors)
+                  for (final c in kCensorColors)
                     Expanded(
                       child: InkWell(
                         borderRadius: BorderRadius.circular(12),
@@ -1060,7 +1091,10 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                                 ),
                               ),
                               const SizedBox(height: 8),
-                              Text(name, style: ctx.texts.labelMedium),
+                              Text(
+                                censorColorLabel(c),
+                                style: ctx.texts.labelMedium,
+                              ),
                             ],
                           ),
                         ),
@@ -1113,7 +1147,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     final img = _img;
     if (grid == null || img == null || _firing) return;
     if (grid.isEmpty) {
-      hintSnack(context, '先涂抹要打码的区域', icon: Icons.brush);
+      hintSnack(context, context.l10n.paintCensorFirst, icon: Icons.brush);
       return;
     }
     setState(() => _firing = true);
@@ -1167,10 +1201,20 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
         input: input,
       );
       if (!mounted) return;
-      hintSnack(context, '已打码并存入图库', icon: Icons.check_circle_outline);
+      hintSnack(
+        context,
+        context.l10n.censoredSaved,
+        icon: Icons.check_circle_outline,
+      );
       await _close();
     } catch (e) {
-      if (mounted) hintSnack(context, '打码失败: $e', icon: Icons.error_outline);
+      if (mounted) {
+        hintSnack(
+          context,
+          context.l10n.censorFailed('$e'),
+          icon: Icons.error_outline,
+        );
+      }
     } finally {
       if (mounted) setState(() => _firing = false);
     }
@@ -1190,41 +1234,57 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     if (isModalModel(input.params.model)) {
       hintSnack(
         context,
-        '${isKreaModel(input.params.model) ? 'Krea 2' : 'Anima'} '
-        '模型不支持重绘,请先切回 NovelAI 模型',
+        context.l10n.inpaintNeedNai(
+          isKreaModel(input.params.model) ? 'Krea 2' : 'Anima',
+        ),
         icon: Icons.block,
       );
       return;
     }
     if (_expandMode) {
       if (!_hasExpand) {
-        hintSnack(context, '先拖动边缘扩展画布', icon: Icons.open_in_full);
+        hintSnack(
+          context,
+          context.l10n.dragEdgesFirst,
+          icon: Icons.open_in_full,
+        );
         return;
       }
       await _fireExpand(img, input);
       return;
     }
     if (grid.isEmpty) {
-      hintSnack(context, '先用画笔涂抹要重绘的区域', icon: Icons.brush);
+      hintSnack(context, context.l10n.paintInpaintFirst, icon: Icons.brush);
       return;
     }
     final send = _cropMode ? _crop : null;
     if (send != null && !grid.hasCellsIn(send)) {
-      hintSnack(context, '黄框内没有涂抹区域', icon: Icons.crop);
+      hintSnack(context, context.l10n.noPaintInBox, icon: Icons.crop);
       return;
     }
-    final sw = send?.w ?? img.width;
-    final sh = send?.h ?? img.height;
+    // 发送时按框裁遮罩,框外的涂抹会被丢掉
+    if (send != null && grid.hasCellsOutside(send)) {
+      hintSnack(context, context.l10n.paintOutsideBox, icon: Icons.crop);
+      return;
+    }
+    // 局部框放大到约 100 万像素再发(同官方),成图回来再缩回框里
+    final out = send == null ? null : focusSendSize(send.w, send.h);
+    final sw = out?.w ?? img.width;
+    final sh = out?.h ?? img.height;
     if (sw * sh > _maxSendPixels) {
       hintSnack(
         context,
-        '发送尺寸过大,请开启「局部」缩小范围',
+        context.l10n.sendTooLarge,
         icon: Icons.photo_size_select_large,
       );
       return;
     }
     if (send == null && (img.width % 64 != 0 || img.height % 64 != 0)) {
-      hintSnack(context, '图片尺寸非 64 对齐,请使用「局部」模式', icon: Icons.straighten);
+      hintSnack(
+        context,
+        context.l10n.notAligned64UseRegion,
+        icon: Icons.straighten,
+      );
       return;
     }
 
@@ -1234,8 +1294,8 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
       final Uint8List mask;
       InpaintPaste? paste;
       if (send != null) {
-        image = await cropPng(_currentBytes, send);
-        mask = await maskToPng(grid, region: send);
+        image = await cropPng(_currentBytes, send, outW: sw, outH: sh);
+        mask = await maskToPng(grid, region: send, outW: sw, outH: sh);
         paste = InpaintPaste(
           original: _currentBytes,
           sendX: send.x,
@@ -1248,7 +1308,10 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
           outH: img.height,
         );
       } else {
-        image = _currentBytes;
+        // NAI 只收 PNG / JPEG / WebP,别的格式(HEIC、AVIF…)先转成 PNG
+        image = isNaiImageFormat(_currentBytes)
+            ? _currentBytes
+            : await ensurePng(_currentBytes);
         mask = await maskToPng(grid);
       }
       if (!mounted) return;
@@ -1261,8 +1324,6 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
           sourceId: widget.session.sourceId,
           grid: grid.encode(),
         ),
-        width: sw,
-        height: sh,
       );
     } finally {
       if (mounted) setState(() => _firing = false);
@@ -1311,7 +1372,9 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                   child: ClipRect(
                     child: ColoredBox(
                       // 与图库画布同底色,原地切换视觉连续
-                      color: scheme.surfaceContainerHigh,
+                      color: context.skin.float
+                          ? scheme.surface
+                          : scheme.surfaceContainerHigh,
                       child: img == null
                           ? const Center(child: CircularProgressIndicator())
                           : LayoutBuilder(
@@ -1480,8 +1543,9 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     return Container(
       height: 46,
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
+        color: context.pageControlFill,
         borderRadius: BorderRadius.circular(14),
+        border: context.edgeBorder,
       ),
       padding: const EdgeInsets.all(4),
       // 一块会平移的实心色块 + 触感,不做任何"这边灭那边亮"。
@@ -1509,19 +1573,19 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
             children: [
               _SegTab(
                 icon: Icons.brush,
-                label: '涂抹',
+                label: context.l10n.inpaintPaint,
                 active: _mode == _Mode.paint,
                 onTap: () => _tapSeg(_Mode.paint),
               ),
               _SegTab(
                 icon: Icons.open_in_full,
-                label: '扩图',
+                label: context.l10n.tabExpand,
                 active: _expandMode,
                 onTap: () => _tapSeg(_Mode.expand),
               ),
               _SegTab(
                 icon: Icons.blur_on,
-                label: '打码',
+                label: context.l10n.tabCensor,
                 active: _censorMode,
                 onTap: () => _tapSeg(_Mode.censor),
               ),
@@ -1544,122 +1608,144 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     final grid = _grid;
     final canUndo = _undo.isNotEmpty;
     final canClear = !(grid?.isEmpty ?? true);
-    return Material(
-      color: scheme.surfaceContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                _ToolBtn(
-                  icon: _assist ? Icons.my_location : Icons.brush,
-                  label: _assist ? '偏位' : '画笔',
-                  active: _tool == _Tool.brush,
-                  onTap: () => _tapTool(_Tool.brush),
-                ),
-                _ToolBtn(
-                  icon: Icons.cleaning_services,
-                  label: '橡皮',
-                  active: _tool == _Tool.eraser,
-                  onTap: () => _tapTool(_Tool.eraser),
-                ),
-                // 局部框是「发送范围」,打码不发送 —— 那一格换成样式切换。
-                // (自动识别不在这排,它挂在 CTA 上,见 _buildCensorCta)
-                if (_censorMode)
+    return Docked(
+      child: Material(
+        color: context.raisedFill(scheme.surfaceContainer),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
                   _ToolBtn(
-                    icon: _censorStyle == CensorStyle.mosaic
-                        ? Icons.blur_on
-                        : Icons.square_rounded,
-                    label: _censorStyle.label,
-                    onTap: _toggleCensorStyle,
-                  )
-                else
+                    icon: _assist ? Icons.my_location : Icons.brush,
+                    label: _assist
+                        ? context.l10n.toolOffset
+                        : context.l10n.draw,
+                    active: _tool == _Tool.brush,
+                    onTap: () => _tapTool(_Tool.brush),
+                  ),
                   _ToolBtn(
-                    icon: Icons.crop,
-                    label: '局部',
-                    active: _cropMode,
-                    onTap: _toggleCrop,
+                    icon: Icons.cleaning_services,
+                    label: context.l10n.erase,
+                    active: _tool == _Tool.eraser,
+                    onTap: () => _tapTool(_Tool.eraser),
                   ),
-                _ToolBtn(
-                  icon: Icons.undo,
-                  label: '撤销',
-                  enabled: canUndo,
-                  onTap: _undoOnce,
-                ),
-                _ToolBtn(
-                  icon: Icons.restart_alt,
-                  label: '清空',
-                  enabled: canClear,
-                  tint: scheme.error,
-                  onTap: _clearAll,
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                _ParamChip(
-                  icon: Icons.line_weight,
-                  label: '笔刷',
-                  value: '${_brush.round()}',
-                  active: _slider == _SliderTarget.brush,
-                  onTap: () => setState(
-                    () => _slider = _slider == _SliderTarget.brush
-                        ? null
-                        : _SliderTarget.brush,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // 打码:强度换成块大小(纯色模式与块无关,整条隐掉)
-                if (!_censorMode)
-                  _ParamChip(
-                    icon: Icons.tune,
-                    label: '强度',
-                    value: _strength.toStringAsFixed(2),
-                    active: _slider == _SliderTarget.strength,
-                    onTap: () => setState(
-                      () => _slider = _slider == _SliderTarget.strength
-                          ? null
-                          : _SliderTarget.strength,
+                  // 局部框是「发送范围」,打码不发送 —— 那一格换成样式切换。
+                  // (自动识别不在这排,它挂在 CTA 上,见 _buildCensorCta)
+                  if (_censorMode)
+                    _ToolBtn(
+                      icon: _censorStyle == CensorStyle.mosaic
+                          ? Icons.blur_on
+                          : Icons.square_rounded,
+                      label: _censorStyle.label,
+                      onTap: _toggleCensorStyle,
+                    )
+                  else
+                    _ToolBtn(
+                      icon: Icons.crop,
+                      label: context.l10n.toolRegion,
+                      active: _cropMode,
+                      onTap: _toggleCrop,
                     ),
-                  )
-                else if (_censorStyle == CensorStyle.mosaic)
+                  _ToolBtn(
+                    icon: Icons.undo,
+                    label: context.l10n.undo,
+                    enabled: canUndo,
+                    onTap: _undoOnce,
+                  ),
+                  _ToolBtn(
+                    icon: Icons.restart_alt,
+                    label: context.l10n.clear,
+                    enabled: canClear,
+                    tint: scheme.error,
+                    onTap: _clearAll,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
                   _ParamChip(
-                    icon: Icons.grid_4x4,
-                    label: '块',
-                    value: '${_censorBlock * 8}',
-                    active: _slider == _SliderTarget.block,
+                    icon: Icons.line_weight,
+                    label: context.l10n.penSizeShort,
+                    value: '${_brush.round()}',
+                    active: _slider == _SliderTarget.brush,
                     onTap: () => setState(
-                      () => _slider = _slider == _SliderTarget.block
+                      () => _slider = _slider == _SliderTarget.brush
                           ? null
-                          : _SliderTarget.block,
+                          : _SliderTarget.brush,
                     ),
-                  )
-                else
-                  // 纯色没有块大小可调,那一格改放填充色
-                  _ParamChip(
-                    icon: Icons.palette_outlined,
-                    swatch: Color(_censorColor),
-                    label: '颜色',
-                    value: censorColorLabel(_censorColor),
-                    active: false,
-                    onTap: _pickCensorColor,
                   ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: SizedBox(
-                    height: 46,
-                    child: _censorMode
-                        ? _buildCensorCta()
-                        : _buildCtaArea('保存遮罩', onPressed: _fire),
+                  const SizedBox(width: 8),
+                  // 打码:强度换成块大小(纯色模式与块无关,整条隐掉)
+                  if (!_censorMode)
+                    _strengthChip()
+                  else if (_censorStyle == CensorStyle.mosaic)
+                    _ParamChip(
+                      icon: Icons.grid_4x4,
+                      label: context.l10n.censorBlock,
+                      value: '${_censorBlock * 8}',
+                      active: _slider == _SliderTarget.block,
+                      onTap: () => setState(
+                        () => _slider = _slider == _SliderTarget.block
+                            ? null
+                            : _SliderTarget.block,
+                      ),
+                    )
+                  else
+                    // 纯色没有块大小可调,那一格改放填充色
+                    _ParamChip(
+                      icon: Icons.palette_outlined,
+                      swatch: Color(_censorColor),
+                      label: context.l10n.censorColorShort,
+                      value: censorColorLabel(_censorColor),
+                      active: false,
+                      onTap: _pickCensorColor,
+                    ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: SizedBox(
+                      height: 46,
+                      child: _censorMode
+                          ? _buildCensorCta()
+                          : _buildCtaArea(
+                              context.l10n.saveMask,
+                              onPressed: _fire,
+                            ),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 强度按钮;所选模型不支持重绘强度时置灰、读数显示实际生效的 1。
+  Widget _strengthChip() {
+    final model = ref.watch(generateProvider.select((s) => s.params.model));
+    final ok = inpaintStrengthSupported(model);
+    return LockedParam(
+      hint: ok
+          ? null
+          : context.l10n.paramUnsupported(
+              modelName(model),
+              context.l10n.inpaintStrength,
             ),
-          ],
+      child: _ParamChip(
+        icon: Icons.tune,
+        label: context.l10n.strength,
+        value: (ok ? _strength : 1.0).toStringAsFixed(2),
+        active: ok && _slider == _SliderTarget.strength,
+        onTap: () => setState(
+          () => _slider = _slider == _SliderTarget.strength
+              ? null
+              : _SliderTarget.strength,
         ),
       ),
     );
@@ -1671,63 +1757,58 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     final img = _img;
     final tw = img == null ? 0 : img.width + _padL + _padR;
     final th = img == null ? 0 : img.height + _padT + _padB;
-    return Material(
-      color: scheme.surfaceContainer,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                _ParamChip(
-                  icon: Icons.aspect_ratio,
-                  label: '尺寸',
-                  value: '$tw×$th',
-                  active: _hasExpand,
-                  onTap: _editExpandSize,
-                ),
-                const SizedBox(width: 8),
-                _ParamChip(
-                  icon: Icons.tune,
-                  label: '强度',
-                  value: _strength.toStringAsFixed(2),
-                  active: _slider == _SliderTarget.strength,
-                  onTap: () => setState(
-                    () => _slider = _slider == _SliderTarget.strength
-                        ? null
-                        : _SliderTarget.strength,
+    return Docked(
+      child: Material(
+        color: context.raisedFill(scheme.surfaceContainer),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  _ParamChip(
+                    icon: Icons.aspect_ratio,
+                    label: context.l10n.size,
+                    value: '$tw×$th',
+                    active: _hasExpand,
+                    onTap: _editExpandSize,
                   ),
-                ),
-                const Spacer(),
-                Material(
-                  color: scheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(13),
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: _hasExpand ? () => setState(_resetPad) : null,
-                    child: SizedBox(
-                      width: 46,
-                      height: 46,
-                      child: Icon(
-                        Icons.restart_alt,
-                        size: 20,
-                        color: _hasExpand
-                            ? scheme.error
-                            : scheme.onSurfaceVariant.withValues(alpha: .35),
+                  const SizedBox(width: 8),
+                  _strengthChip(),
+                  const Spacer(),
+                  Material(
+                    color: scheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(13),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: _hasExpand ? () => setState(_resetPad) : null,
+                      child: SizedBox(
+                        width: 46,
+                        height: 46,
+                        child: Icon(
+                          Icons.restart_alt,
+                          size: 20,
+                          color: _hasExpand
+                              ? scheme.error
+                              : scheme.onSurfaceVariant.withValues(alpha: .35),
+                        ),
                       ),
                     ),
                   ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 46,
+                width: double.infinity,
+                child: _buildCtaArea(
+                  context.l10n.saveExpand,
+                  disabled: !_hasExpand,
                 ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 46,
-              width: double.infinity,
-              child: _buildCtaArea('保存扩图', disabled: !_hasExpand),
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1748,11 +1829,11 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   Widget _buildCensorCta() {
     final empty = _grid?.isEmpty ?? true;
     return _buildCtaArea(
-      empty ? '自动识别' : '保存',
+      empty ? context.l10n.autoDetect : context.l10n.save,
       icon: empty ? Icons.auto_fix_high : Icons.check_rounded,
       onPressed: empty ? _autoDetect : _fire,
       busy: empty ? _detecting : _firing,
-      busyLabel: empty ? '识别中…' : '保存中…',
+      busyLabel: empty ? context.l10n.detecting : context.l10n.savingEllipsis,
     );
   }
 
@@ -1762,8 +1843,9 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     IconData icon = Icons.check_rounded,
     VoidCallback? onPressed,
     bool? busy,
-    String busyLabel = '保存中…',
+    String? busyLabel,
   }) {
+    busyLabel ??= context.l10n.savingEllipsis;
     final scheme = context.scheme;
     final loading = busy ?? _firing;
     return FilledButton(
@@ -1833,9 +1915,9 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     final scheme = context.scheme;
     final t = _slider ?? _SliderTarget.brush;
     final title = switch (t) {
-      _SliderTarget.brush => '笔刷大小',
-      _SliderTarget.strength => '重绘强度',
-      _SliderTarget.block => '马赛克块',
+      _SliderTarget.brush => context.l10n.penSize,
+      _SliderTarget.strength => context.l10n.inpaintStrength,
+      _SliderTarget.block => context.l10n.mosaicBlock,
     };
     // 块以像素示人(格数是实现细节),读数与滑杆都按 px 走
     final valueText = switch (t) {
@@ -1846,18 +1928,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 14),
-      decoration: BoxDecoration(
-        color: scheme.surface.withValues(alpha: .85),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: .7)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: .14),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      decoration: context.floatingPill(24),
       child: Row(
         children: [
           Text(
@@ -1878,7 +1949,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                   ),
                   _SliderTarget.strength => Slider(
                     value: _strength,
-                    min: 0.1,
+                    min: 0.01,
                     max: 1.0,
                     // 不传 divisions:离散 Slider 会用 75ms 曲线把滑块吸到
                     // 刻度,拖起来黏手。步长(0.01)就地量化。
@@ -1912,7 +1983,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                 },
                 min: switch (t) {
                   _SliderTarget.brush => 5,
-                  _SliderTarget.strength => 0.1,
+                  _SliderTarget.strength => 0.01,
                   _SliderTarget.block => kCensorBlockMin * 8.0,
                 },
                 max: switch (t) {
@@ -1922,7 +1993,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                 },
                 divisions: switch (t) {
                   _SliderTarget.brush => 195,
-                  _SliderTarget.strength => 90,
+                  _SliderTarget.strength => 99,
                   _SliderTarget.block => kCensorBlockMax - kCensorBlockMin,
                 },
               );
@@ -2455,16 +2526,18 @@ class _RoundBtn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      shape: const CircleBorder(),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: SizedBox(
-          width: 46,
-          height: 46,
-          child: Icon(icon, size: 21, color: scheme.onSurface),
+    return Lifted(
+      child: Material(
+        color: context.pageControlFill,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            width: 46,
+            height: 46,
+            child: Icon(icon, size: 21, color: scheme.onSurface),
+          ),
         ),
       ),
     );
@@ -2547,11 +2620,13 @@ class _ToolBtn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    final bg = active ? scheme.primaryContainer : Colors.transparent;
+    final bg = active
+        ? context.solidFill(scheme.primaryContainer)
+        : Colors.transparent;
     final fg = !enabled
         ? scheme.onSurfaceVariant.withValues(alpha: .35)
         : active
-        ? scheme.onPrimaryContainer
+        ? context.onSolidFill(scheme.onPrimaryContainer)
         : (tint ?? scheme.onSurfaceVariant);
     return Material(
       color: bg,
@@ -2742,16 +2817,16 @@ class _ExpandSizeDialogState extends State<_ExpandSizeDialog> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return AlertDialog(
-      title: const Text('扩图尺寸'),
+      title: Text(context.l10n.expandSize),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _row('宽', _w, widget.initW, widget.minW),
+          _row(context.l10n.widthShort, _w, widget.initW, widget.minW),
           const SizedBox(height: 10),
-          _row('高', _h, widget.initH, widget.minH),
+          _row(context.l10n.heightShort, _h, widget.initH, widget.minH),
           const SizedBox(height: 12),
           Text(
-            '原图 ${widget.minW}×${widget.minH},增量对称分配到两侧(64 对齐)',
+            context.l10n.expandHint(widget.minW, widget.minH),
             style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
           ),
         ],
@@ -2759,14 +2834,14 @@ class _ExpandSizeDialogState extends State<_ExpandSizeDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
+          child: Text(context.l10n.cancel),
         ),
         FilledButton(
           onPressed: () => Navigator.of(context).pop((
             w: int.tryParse(_w.text.trim()) ?? widget.initW,
             h: int.tryParse(_h.text.trim()) ?? widget.initH,
           )),
-          child: const Text('确定'),
+          child: Text(context.l10n.ok),
         ),
       ],
     );
@@ -2789,27 +2864,14 @@ class _CompareButton extends StatelessWidget {
       child: Container(
         height: 40,
         padding: const EdgeInsets.symmetric(horizontal: 15),
-        decoration: BoxDecoration(
-          color: scheme.surface.withValues(alpha: .85),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: scheme.outlineVariant.withValues(alpha: .7),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: .14),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
+        decoration: context.floatingPill(20),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.visibility_outlined, size: 16, color: scheme.onSurface),
             const SizedBox(width: 7),
             Text(
-              '按住对比',
+              context.l10n.holdToCompare,
               style: TextStyle(
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,

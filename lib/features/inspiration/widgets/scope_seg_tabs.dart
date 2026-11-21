@@ -1,27 +1,34 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../l10n/l10n.dart';
 
 /// 「我的 / 公共库」分段:滑动指示器 + 渐变标签(随 [controller] 的动画走),
-/// 整段任意位置可点。灵感页与选角色面板共用。
+/// 整段任意位置可点。[compact] 是搜索框旁的窄版:不带图标、不写条数。
 class ScopeSegTabs extends StatelessWidget {
   const ScopeSegTabs({
     super.key,
     required this.controller,
     required this.mineCount,
+    this.publicCount,
+    this.compact = false,
   });
 
   final TabController controller;
   final int mineCount;
 
+  /// 公共库条数;null = 还没拉到,不显示。
+  final int? publicCount;
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
-    final scheme = context.scheme;
     return SizedBox(
-      height: 42,
+      height: compact ? 40 : 42,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: scheme.surfaceContainerHigh,
+          color: context.pageControlFill,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Stack(
@@ -45,7 +52,7 @@ class ScopeSegTabs extends StatelessWidget {
                             width: segW - 6,
                             child: DecoratedBox(
                               decoration: BoxDecoration(
-                                color: scheme.surface,
+                                color: context.segThumb,
                                 borderRadius: BorderRadius.circular(9),
                                 boxShadow: [
                                   BoxShadow(
@@ -63,10 +70,22 @@ class ScopeSegTabs extends StatelessWidget {
                                 context,
                                 0,
                                 Icons.bookmark_outline,
-                                '我的 · $mineCount',
+                                compact
+                                    ? context.l10n.scopeMine
+                                    : context.l10n.scopeMineN(mineCount),
                                 t,
                               ),
-                              _label(context, 1, Icons.public, '公共库', t),
+                              _label(context, 1, Icons.public, switch ((
+                                compact,
+                                publicCount,
+                              )) {
+                                (true, final int n) =>
+                                  context.l10n.scopePublicShortN(n),
+                                (true, null) => context.l10n.scopePublicShort,
+                                (false, final int n) =>
+                                  context.l10n.scopePublicN(n),
+                                (false, null) => context.l10n.publicLibrary,
+                              }, t),
                             ],
                           ),
                         ],
@@ -106,16 +125,25 @@ class ScopeSegTabs extends StatelessWidget {
   ) {
     final scheme = context.scheme;
     final sel = i == 0 ? 1 - t : t;
-    final color = Color.lerp(scheme.onSurfaceVariant, scheme.primary, sel);
+    final color = Color.lerp(
+      scheme.onSurfaceVariant,
+      context.segLabel(scheme.primary),
+      sel,
+    );
     return Expanded(
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, size: 15, color: color),
-          const SizedBox(width: 6),
+          if (!compact) ...[
+            Icon(icon, size: 15, color: color),
+            const SizedBox(width: 6),
+          ],
           Text(
             label,
+            maxLines: 1,
+            softWrap: false,
             style: context.texts.labelLarge!.copyWith(
+              fontSize: compact ? 14 : null,
               fontWeight: FontWeight.w700,
               color: color,
             ),

@@ -6,6 +6,7 @@ import '../../../core/theme/app_theme.dart';
 import '../gallery_groups.dart';
 import '../models.dart';
 import 'result_thumb.dart';
+import '../../../l10n/l10n.dart';
 
 /// 堆的封面卡:封面图 + 身后两片露边的「还有更多」+ 名字 + 张数。
 ///
@@ -29,6 +30,8 @@ class GalleryStackCard extends StatelessWidget {
     this.onLongPress,
     this.stacked = true,
     this.cover,
+    this.emptyIcon = Icons.photo_library_outlined,
+    this.coverIcon,
   });
 
   final GalleryGroup group;
@@ -52,6 +55,12 @@ class GalleryStackCard extends StatelessWidget {
   /// 相册卡长按设过的封面;null 用堆里第一张(最新那张)。
   final ResultImage? cover;
 
+  /// 没有图时封面上画的图标。
+  final IconData emptyIcon;
+
+  /// 固定的图标封面(收藏、回收站):不管有没有图都画它。
+  final IconData? coverIcon;
+
   /// 封面墙所在面板的最低高度:两行半封面卡。相册、图片没几张时面板按内容缩,
   /// 但缩到这里为止。几何与相册首页、选相册面板的网格一致(两侧 12、列距 6、
   /// 行距 12、名字两行 44)。
@@ -72,7 +81,9 @@ class GalleryStackCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    final cover = this.cover ?? group.items.firstOrNull;
+    final cover = coverIcon != null
+        ? null
+        : this.cover ?? group.items.firstOrNull;
     final piled = stacked && group.items.length > 1;
     return GestureDetector(
       onTap: onTap,
@@ -134,7 +145,7 @@ class GalleryStackCard extends StatelessWidget {
                                       borderRadius: BorderRadius.circular(10),
                                     ),
                                     child: Icon(
-                                      Icons.photo_library_outlined,
+                                      coverIcon ?? emptyIcon,
                                       size: 36,
                                       color: scheme.onSurfaceVariant,
                                     ),
@@ -153,7 +164,7 @@ class GalleryStackCard extends StatelessWidget {
                           top: 8,
                           left: w - 34,
                           child: Semantics(
-                            label: '新图保存到这里',
+                            label: context.l10n.newImagesSaveHere,
                             child: Container(
                               width: 26,
                               height: 26,
@@ -211,7 +222,7 @@ class GalleryStackCard extends StatelessWidget {
             ),
           ),
           Text(
-            '${group.items.length} 张',
+            context.l10n.imagesN(group.items.length),
             maxLines: 1,
             style: context.texts.bodySmall!.copyWith(color: scheme.outline),
           ),

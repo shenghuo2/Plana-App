@@ -1,10 +1,14 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/auth/auth_mode.dart';
 import '../../../core/auth/bot_session_store.dart';
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
+import '../canvas_state.dart';
 import '../generate_state.dart';
 import '../gpu_rental.dart';
 import '../models.dart' as m;
@@ -12,6 +16,9 @@ import 'anlas_panel.dart';
 import 'canvas_picker.dart';
 import 'common.dart' show hintSnack;
 import 'rental_panel.dart';
+import 'top_bar_status.dart' show topBarTextWidth;
+import '../../../l10n/l10n.dart';
+import '../display_names.dart';
 
 /// 单行顶栏：画布、模型和资源均裸显示。
 class GenerateTopBar extends ConsumerWidget {
@@ -58,6 +65,10 @@ class GenerateTopBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final model = ref.watch(generateProvider.select((s) => s.params.model));
+    final canvasName = canvasDisplayName(
+      context.l10n,
+      ref.watch(canvasWorkspaceProvider.select((w) => w.active.name)),
+    );
     final rentalActive = ref.watch(gpuRentalProvider).active;
     final scheme = context.scheme;
     final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
@@ -66,53 +77,59 @@ class GenerateTopBar extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
       child: LayoutBuilder(
+        // 三段各占固定的格:画布靠左、模型在中间那格居中、读数靠右(读数自己
+        // 定宽)。名字长短变了只在各自格里截断,不推着别的段挪位
         builder: (context, constraints) => Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Flexible(
+            Expanded(
               flex: 4,
-              child: SizedBox(height: rowHeight, child: const CanvasPicker()),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: SizedBox(height: rowHeight, child: const CanvasPicker()),
+              ),
             ),
             const SizedBox(width: 4),
-            Flexible(
+            Expanded(
               flex: 5,
-              child: Tooltip(
-                message: '切换模型：$model',
-                child: Semantics(
-                  button: true,
-                  label: '切换模型，当前 $model',
-                  child: Material(
-                    color: Colors.transparent,
-                    borderRadius: BorderRadius.circular(12),
-                    clipBehavior: Clip.antiAlias,
-                    child: InkWell(
-                      onTap: () => _pickModel(context, ref),
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 2),
-                        child: SizedBox(
-                          height: rowHeight,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  model,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: context.texts.bodyMedium!.copyWith(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                    color: scheme.onSurface,
+              child: Center(
+                child: Tooltip(
+                  message: context.l10n.switchModelTooltip(model),
+                  child: Semantics(
+                    button: true,
+                    label: context.l10n.switchModelSemantics(model),
+                    child: Material(
+                      color: Colors.transparent,
+                      borderRadius: BorderRadius.circular(12),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: () => _pickModel(context, ref),
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 2),
+                          child: SizedBox(
+                            height: rowHeight,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    m.shortModelName(model),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: context.texts.bodyMedium!.copyWith(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                      color: scheme.onSurface,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 3),
-                              Icon(
-                                Icons.expand_more,
-                                size: 20,
-                                color: scheme.outline,
-                              ),
-                            ],
+                                const SizedBox(width: 3),
+                                Icon(
+                                  Icons.expand_more,
+                                  size: 20,
+                                  color: scheme.outline,
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -129,7 +146,14 @@ class GenerateTopBar extends ConsumerWidget {
                 // 持续订阅实例状态，NAI 下也显示仍在计费的算力。
                 child: m.isModalModel(model) || rentalActive
                     ? const RentalSourceChip(compact: true)
-                    : const AnlasChip(),
+                    : AnlasChip(
+                        budget: _readoutBudget(
+                          context,
+                          constraints.maxWidth,
+                          canvasName,
+                          model,
+                        ),
+                      ),
               ),
             ),
           ],
@@ -137,6 +161,24 @@ class GenerateTopBar extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// 读数最多能占多宽,画布名和模型名才都不被截(两格按 4 : 5 分读数以外的
+/// 宽度):画布格是图标 + 名字 + 箭头,模型格是名字 + 箭头。
+double _readoutBudget(
+  BuildContext context,
+  double width,
+  String canvasName,
+  String model,
+) {
+  final style = context.texts.bodyMedium!.copyWith(
+    fontSize: 15,
+    fontWeight: FontWeight.w600,
+  );
+  final canvasNeed = 47 + topBarTextWidth(context, canvasName, style);
+  final modelNeed =
+      25 + topBarTextWidth(context, m.shortModelName(model), style);
+  return width - 8 - max(canvasNeed * 9 / 4, modelNeed * 9 / 5);
 }
 
 /// 模型选择弹层(定高七成屏):下划线 Tab + 可左右滑的分页,每页是该大类的型号列表。
@@ -201,7 +243,7 @@ class _ModelSheetState extends State<_ModelSheet>
               child: Row(
                 children: [
                   Text(
-                    '模型',
+                    context.l10n.model,
                     style: context.texts.titleMedium!.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
@@ -272,10 +314,10 @@ class _ModelSheetState extends State<_ModelSheet>
   );
 
   Widget _modelTile(String model) {
-    final desc = m.modelDescriptions[model];
+    final desc = _modelDescription(context.l10n, model);
     return ListTile(
       onTap: () => Navigator.pop(context, model),
-      title: Text(model, style: context.texts.bodyMedium),
+      title: Text(m.modelName(model), style: context.texts.bodyMedium),
       // 副标题恒单行:文案本身已按一行裁,但系统字号调大/窄屏仍会折行 ——
       // 折了这张表就一页两套行高,ellipsis 兜住。
       subtitle: desc == null
@@ -303,8 +345,8 @@ class _ModelSheetState extends State<_ModelSheet>
 ///
 /// 下拉而不是点一下对切(与并排的 [RentalSourceChip]、统计页的数据源下拉同一
 /// 套):两个去处摊开摆着,不用先按一下才知道另一边是什么。没授权 Bot 时那行
-/// 压暗但照样点得动 —— 点它给的是「去哪授权」的指路,禁用了反倒只剩一条说不出
-/// 所以然的灰杠。而「选了 Bot 却没授权」那种坏状态,回 Token 这行永远亮着。
+/// 压暗但照样点得动 —— 点它提示暂未开放,禁用了反倒只剩一条说不出所以然的
+/// 灰杠。而「选了 Bot 却没授权」那种坏状态,回 Token 这行永远亮着。
 class _AuthModeChip extends ConsumerWidget {
   const _AuthModeChip();
 
@@ -341,7 +383,7 @@ class _AuthModeChip extends ConsumerWidget {
 
     // Material 在外、菜单按钮在内:水波纹才会被裁成胶囊,而不是方角糊出来。
     return Material(
-      color: scheme.surfaceContainerHigh,
+      color: context.pageControlFill,
       borderRadius: BorderRadius.circular(_height / 2),
       clipBehavior: Clip.antiAlias,
       child: PopupMenuButton<AuthMode>(
@@ -350,11 +392,7 @@ class _AuthModeChip extends ConsumerWidget {
         onSelected: (v) {
           if (v == mode) return;
           if (v == AuthMode.bot && !canSwitch) {
-            hintSnack(
-              context,
-              '尚未授权 Bot,去「我的 → 账号与接入」授权后可切',
-              icon: Icons.smart_toy_outlined,
-            );
+            hintSnack(context, '暂未开放', icon: Icons.smart_toy_outlined);
             return;
           }
           Haptics.selection();
@@ -393,3 +431,15 @@ class _AuthModeChip extends ConsumerWidget {
     );
   }
 }
+
+/// 模型选择弹层的副标题:NAI 各档按界面语言取,其余见 [m.modelDescriptions]。
+String? _modelDescription(AppLocalizations l, String model) => switch (model) {
+  'NAI 5.0 Full' => l.descNai5Full,
+  'NAI 5.0 Full Medium' => l.descNai5Medium,
+  'NAI 5.0 Curated' => l.descNai5Curated,
+  'NAI 4.5 Full' => l.descNai45Full,
+  'NAI 4.5 Curated' => l.descNai45Curated,
+  'NAI 4.0 Full' => l.descNai4Full,
+  'NAI 4.0 Curated' => l.descNai4Curated,
+  _ => m.modelDescriptions[model],
+};

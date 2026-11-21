@@ -7,20 +7,24 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/store/app_stores.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
 import '../generate/generation_controller.dart';
 import '../generate/widgets/common.dart' show hintSnack;
 import '../inpaint/inpaint_overlay.dart';
+import '../shell/shell_state.dart';
 import 'gallery_state.dart';
 import 'models.dart';
 import 'save_settings.dart';
 import 'share_pipeline.dart';
 import 'widgets/film_strip.dart';
+import 'widgets/gallery_grid_sheet.dart';
 import 'widgets/result_canvas.dart';
+import '../../l10n/l10n.dart';
 
 /// 图库页:上方结果画布(大图 + 操作轨 + seed)、下方历史胶片条。
 /// 生成链路产出的结果落在这里查看与二次操作。
-/// 重绘会话期间 keep-alive:切去其他 tab 再回来,编辑面板(遮罩等)原样保留。
+/// keep-alive:切去其他 tab 再回来,胶片条滚动位置、重绘编辑面板(遮罩等)原样保留。
 ///
 /// 画布是一条真正的 PageView(一页一张,与胶片条同序:0=最新在左,左滑看更旧),
 /// 图跟手走、松手吸附 —— 以前那套「raw pointer 认快滑 + 自己放一段推移动画」的
@@ -38,22 +42,18 @@ class GalleryPage extends ConsumerStatefulWidget {
 /// 图库连弹两条本身就很吵。按下面的顺序挑第一条没提过的,剩下的等下次进
 /// 图库(下次冷启动)再说 —— 这两个手势都藏得深,不说没人发现,但也不急在
 /// 同一秒说完。
-const _kGalleryHints = <({String key, String text, IconData icon})>[
-  (
-    key: 'hint_save_longpress',
-    text: '长按「保存」可进入下载设置',
-    icon: Icons.download_outlined,
-  ),
-  (
-    key: 'hint_strip_swipe',
-    text: '底部胶片条里的图,向上滑可以分享或删除',
-    icon: Icons.swipe_up_outlined,
-  ),
+const _kGalleryHints = <({String key, IconData icon})>[
+  (key: 'hint_save_longpress', icon: Icons.download_outlined),
+  (key: 'hint_strip_swipe', icon: Icons.swipe_up_outlined),
 ];
+
+String _hintText(AppLocalizations l, String key) => switch (key) {
+  'hint_save_longpress' => l.hintSaveLongPress,
+  _ => l.hintStripSwipe,
+};
 
 class _GalleryPageState extends ConsumerState<GalleryPage>
     with AutomaticKeepAliveClientMixin {
-  bool _keep = false;
   bool _hintChecked = false;
 
   /// 最近一次成功显示的原图字节。切到尚未读盘的老图时先继续画它,
@@ -100,7 +100,7 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
   }
 
   @override
-  bool get wantKeepAlive => _keep;
+  bool get wantKeepAlive => true;
 
   /// 跳页只能在帧后做(build 里动 controller 会打断本帧布局)。空窗这一两帧
   /// 由 build 里的「顶图层」盖着,看不出断层。
@@ -165,7 +165,11 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
     );
     if (!mounted) return;
     if (prep.files.isEmpty) {
-      hintSnack(context, '没有可分享的图片', icon: Icons.error_outline);
+      hintSnack(
+        context,
+        context.l10n.nothingToShare,
+        icon: Icons.error_outline,
+      );
       return;
     }
     await SharePlus.instance.share(ShareParams(files: prep.files));
@@ -182,7 +186,9 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
       prefs.write(key: h.key, value: '1');
       // build 里不能直接弹 overlay,推到帧后
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) hintSnack(context, h.text, icon: h.icon);
+        if (mounted) {
+          hintSnack(context, _hintText(context.l10n, h.key), icon: h.icon);
+        }
       });
       return; // 一次一条
     }
@@ -215,14 +221,9 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
     final inpaint = ref.watch(inpaintSessionProvider);
     final selected = state.selected;
 
-    // 重绘会话开/关时更新 keep-alive(仅编辑期间常驻,平时随 PageView 回收)
-    final keep = inpaint != null;
-    if (keep != _keep) {
-      _keep = keep;
-      updateKeepAlive();
-    }
-
-    _maybeHint(!state.isEmpty);
+    // 页面常驻,停在别的 tab 时也会重建:只在图库在前台时提引导
+    final front = ref.watch(shellIndexProvider.select((i) => i == kTabGallery));
+    _maybeHint(front && !state.isEmpty);
 
     if (!gen.busy && state.isEmpty && inpaint == null && pool.jobs.isEmpty) {
       return const _EmptyGallery();
@@ -324,12 +325,8 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
                     // 整图。整图生成时 pasteUnder 为空,走原来那条。
                     _ZoomableImage(
                       bytes: gen.pasteUnder ?? gen.preview ?? selBytes,
-                      width: gen.pasteUnder != null
-                          ? (selected?.width ?? gen.width)
-                          : gen.width,
-                      height: gen.pasteUnder != null
-                          ? (selected?.height ?? gen.height)
-                          : gen.height,
+                      width: gen.pasteSize?.w ?? gen.width,
+                      height: gen.pasteSize?.h ?? gen.height,
                       overlay: gen.pasteUnder == null ? null : gen.preview,
                       overlayAt: gen.pasteAt,
                     ),
@@ -391,11 +388,11 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
             ),
             if (previewImage != null && !showGen)
               Material(
-                color: context.scheme.surfaceContainer,
+                color: context.raisedFill(context.scheme.surfaceContainer),
                 child: Row(
                   children: [
                     IconButton(
-                      tooltip: '返回历史',
+                      tooltip: context.l10n.backToHistory,
                       onPressed: () => ref
                           .read(galleryResultPreviewProvider.notifier)
                           .clear(),
@@ -403,7 +400,11 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
                     ),
                     Expanded(
                       child: Text(
-                        '已保存到 ${ref.watch(albumsProvider).name(preview!.target.albumId)}',
+                        context.l10n.savedToNamed(
+                          ref
+                              .watch(albumsProvider)
+                              .name(preview!.target.albumId),
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -423,7 +424,7 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
                             .read(galleryProvider.notifier)
                             .select(preview.imageId);
                       },
-                      child: const Text('浏览相册'),
+                      child: Text(context.l10n.browseAlbums),
                     ),
                   ],
                 ),
@@ -437,8 +438,24 @@ class _GalleryPageState extends ConsumerState<GalleryPage>
                 ref.read(galleryProvider.notifier).select(id);
               },
               onShare: _shareOne,
-              onDelete: (id) =>
-                  ref.read(galleryProvider.notifier).deleteResults([id]),
+              onFavorite: (id) => toggleFavorite(context, id),
+              isFavorite: (id) => ref.read(albumsProvider).isFavorite(id),
+              onDelete: (id) {
+                final gallery = ref.read(galleryProvider.notifier);
+                final wasSelected = ref.read(galleryProvider).selectedId == id;
+                gallery.deleteResults([id]);
+                hintSnack(
+                  context,
+                  context.l10n.movedToTrash,
+                  icon: Icons.delete_outline,
+                  actionLabel: context.l10n.undo,
+                  onAction: () {
+                    if (gallery.restoreTrash([id]) > 0 && wasSelected) {
+                      gallery.select(id);
+                    }
+                  },
+                );
+              },
               jobs: pool.newestFirst,
               selectedJobId: pool.selectedId,
               onSelectJob: (id) {
@@ -660,6 +677,9 @@ class _EmptyGallery extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = context.scheme;
     final inAlbum = ref.watch(galleryBrowseAlbumProvider) != null;
+    final hasTrash = ref.watch(
+      galleryProvider.select((s) => s.trash.isNotEmpty),
+    );
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -667,7 +687,7 @@ class _EmptyGallery extends ConsumerWidget {
           Icon(Icons.photo_library_outlined, size: 56, color: scheme.outline),
           const SizedBox(height: 12),
           Text(
-            inAlbum ? '这个相册还没有照片' : '还没有作品',
+            inAlbum ? context.l10n.albumEmpty : context.l10n.noWorksYet,
             style: context.texts.titleMedium!.copyWith(
               fontWeight: FontWeight.w600,
             ),
@@ -678,10 +698,15 @@ class _EmptyGallery extends ConsumerWidget {
           if (inAlbum)
             TextButton(
               onPressed: () => showAlbumBrowsePicker(context),
-              child: const Text('选择相册'),
+              child: Text(context.l10n.chooseAlbum),
+            )
+          else if (hasTrash)
+            TextButton(
+              onPressed: () => showGalleryGrid(context, trash: true),
+              child: Text(context.l10n.viewTrash),
             ),
           Text(
-            '去「创作」生成第一张',
+            context.l10n.goCreateFirst,
             style: context.texts.bodySmall!.copyWith(color: scheme.outline),
           ),
         ],

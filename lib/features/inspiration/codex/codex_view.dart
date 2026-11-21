@@ -5,16 +5,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/store/ui_prefs.dart';
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/ui/fast_scroll_handle.dart';
 import '../../../core/ui/pinch_columns.dart';
 import '../../../core/ui/scroll_memory.dart';
 import '../../generate/widgets/common.dart' show hintSnack;
+import 'codex_block.dart';
 import 'codex_card.dart';
 import 'codex_favorites.dart';
 import 'codex_masonry.dart';
 import 'codex_models.dart';
 import 'codex_providers.dart';
 import 'codex_sheets.dart';
+import '../../../l10n/l10n.dart';
 
 /// 法典浏览器:灵感页选中「法典」分类时的正文。
 /// 顶部选法典 + 来源;下面搜索 + 顶级分类筛选 + 瀑布流(双指捏合换列数)。
@@ -98,16 +102,29 @@ class _CodexViewState extends ConsumerState<CodexView>
   String _resolveSelectedId(List<CodexMeta> index) =>
       resolveSelectedCodex(index, ref.watch(selectedCodexProvider)).id;
 
-  List<CodexEntry> _filtered(CodexData d) {
+  List<CodexEntry> _filtered(CodexData d, CodexBlock block) {
     final q = _search.trim().toLowerCase();
-    return [
+    return d.onePerArtist([
       for (final e in d.entries)
         if (_underCat(e) &&
+            !block.hides(e.path) &&
             (q.isEmpty ||
                 e.title.toLowerCase().contains(q) ||
-                e.tags.toLowerCase().contains(q)))
+                e.tags.toLowerCase().contains(q) ||
+                e.characters.any((c) => c.prompt.toLowerCase().contains(q))))
           e,
-    ];
+    ]);
+  }
+
+  /// 分类弹层数条数用的整部词条(一位画师算一条);按法典数据缓存。
+  CodexData? _browseFor;
+  List<CodexEntry> _browse = const [];
+  List<CodexEntry> _browseEntries(CodexData d) {
+    if (!identical(d, _browseFor)) {
+      _browseFor = d;
+      _browse = d.onePerArtist(d.entries);
+    }
+    return _browse;
   }
 
   bool _underCat(CodexEntry e) => codexPathUnder(e.path, _catPath);
@@ -139,10 +156,12 @@ class _CodexViewState extends ConsumerState<CodexView>
     final indexAsync = ref.watch(codexIndexProvider);
     return indexAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) =>
-          _error('法典索引加载失败', () => ref.invalidate(codexIndexProvider)),
+      error: (e, _) => _error(
+        context.l10n.codexIndexFailed,
+        () => ref.invalidate(codexIndexProvider),
+      ),
       data: (index) {
-        if (index.isEmpty) return _msg('暂无法典');
+        if (index.isEmpty) return _msg(context.l10n.noCodex);
         final selId = _viewId = _resolveSelectedId(index);
         final meta = index.firstWhere((m) => m.id == selId);
         // 首次进入法典功能:读盘确认为「没读过」时弹一次说明。
@@ -167,11 +186,9 @@ class _CodexViewState extends ConsumerState<CodexView>
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         icon: Icon(Icons.menu_book_outlined, color: context.scheme.primary),
-        title: const Text('法典图鉴'),
+        title: Text(context.l10n.codexSource),
         content: SelectableText(
-          '词条与例图数据来自\nhttps://novelai.quicktagcloud.com/\n\n'
-          '本应用仅作展示与检索,内容版权归各法典作者所有。\n\n'
-          '感谢所有法典作者与贡献者的整理分享。',
+          context.l10n.codexAbout,
           style: context.texts.bodyMedium,
         ),
         actions: [
@@ -184,14 +201,14 @@ class _CodexViewState extends ConsumerState<CodexView>
                 mode: LaunchMode.externalApplication,
               );
             },
-            child: const Text('来源与致谢'),
+            child: Text(context.l10n.sourcesThanks),
           ),
           FilledButton(
             onPressed: () {
               ref.read(codexIntroProvider.notifier).ack();
               Navigator.pop(ctx);
             },
-            child: const Text('我知道了'),
+            child: Text(context.l10n.gotIt),
           ),
         ],
       ),
@@ -208,7 +225,7 @@ class _CodexViewState extends ConsumerState<CodexView>
             const CircularProgressIndicator(),
             const SizedBox(height: 12),
             Text(
-              '正在载入 ${meta.entryCount} 条词条…',
+              context.l10n.loadingEntries(meta.entryCount),
               style: context.texts.bodySmall!.copyWith(
                 color: context.scheme.onSurfaceVariant,
               ),
@@ -216,23 +233,34 @@ class _CodexViewState extends ConsumerState<CodexView>
           ],
         ),
       ),
-      error: (e, _) =>
-          _error('法典加载失败', () => ref.invalidate(codexDataProvider(meta.id))),
+      error: (e, _) => _error(
+        context.l10n.codexLoadFailed,
+        () => ref.invalidate(codexDataProvider(meta.id)),
+      ),
       data: (d) {
         // 词条到手就把这部的中文对照也拉上:点开详情时表多半已就绪,芯片不用
         // 先出离线词库的译名、再被对照表换一遍字。listen 不 watch —— 表到了
         // 这层不用重建。
         ref.listen(codexTagZhProvider(meta.id), (_, _) {});
+        // 正选着的分类被屏蔽了:退回全部
+        ref.listen(codexBlockProvider(meta.id), (_, b) {
+          if (b.hides(_catPath)) setState(() => _catPath = const []);
+        });
+        final block = ref.watch(codexBlockProvider(meta.id));
         final media =
             ref.watch(codexMediaProvider).value ?? CodexMedia.fallback;
-        final entries = _filtered(d);
+        final entries = _filtered(d, block);
         return Column(
           children: [
             _searchRow(),
-            _filterBar(d, meta, media, entries),
+            _filterBar(d, meta, media, entries, block),
             Expanded(
               child: entries.isEmpty
-                  ? _msg(_search.isNotEmpty ? '没有匹配的词条' : '暂无词条')
+                  ? _msg(
+                      _search.isNotEmpty
+                          ? context.l10n.noMatchingEntries
+                          : context.l10n.noEntries,
+                    )
                   : _grid(meta, media, entries),
             ),
           ],
@@ -242,24 +270,39 @@ class _CodexViewState extends ConsumerState<CodexView>
   }
 
   Widget _searchRow() {
-    final scheme = context.scheme;
+    // 选法典单独一行当标题,搜索框占满整行
     return Padding(
-      padding: const EdgeInsets.fromLTRB(_edge, 8, _edge, 0),
-      child: TextField(
-        controller: _searchCtrl,
-        onChanged: _onSearch,
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: '搜索标题 / 提示词…',
-          prefixIcon: const Icon(Icons.search, size: 20),
-          filled: true,
-          fillColor: scheme.surfaceContainerHigh,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
+      padding: const EdgeInsets.fromLTRB(_edge, 4, _edge, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const CodexPickerButton(),
+          const SizedBox(height: 4),
+          SizedBox(
+            height: 40,
+            child: TextField(
+              controller: _searchCtrl,
+              onChanged: _onSearch,
+              textAlignVertical: TextAlignVertical.center,
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: context.l10n.searchTitlePromptHint,
+                prefixIcon: const Icon(Icons.search, size: 20),
+                prefixIconConstraints: const BoxConstraints(
+                  minWidth: 40,
+                  minHeight: 40,
+                ),
+                filled: true,
+                fillColor: context.pageControlFill,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
           ),
-          contentPadding: const EdgeInsets.symmetric(vertical: 8),
-        ),
+        ],
       ),
     );
   }
@@ -272,6 +315,7 @@ class _CodexViewState extends ConsumerState<CodexView>
     CodexMeta meta,
     CodexMedia media,
     List<CodexEntry> entries,
+    CodexBlock block,
   ) {
     final tree = d.effectiveTree;
     return Padding(
@@ -280,7 +324,10 @@ class _CodexViewState extends ConsumerState<CodexView>
         children: [
           Expanded(
             child: tree.isNotEmpty
-                ? Align(alignment: Alignment.centerLeft, child: _catButton(d))
+                ? Align(
+                    alignment: Alignment.centerLeft,
+                    child: _catButton(d, meta, block),
+                  )
                 : const SizedBox.shrink(),
           ),
           _favButton(),
@@ -297,7 +344,7 @@ class _CodexViewState extends ConsumerState<CodexView>
     final scheme = context.scheme;
     final n = ref.watch(codexFavKeysProvider).length;
     return Material(
-      color: scheme.surfaceContainerHigh,
+      color: context.pageControlFill,
       borderRadius: BorderRadius.circular(20),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -314,7 +361,7 @@ class _CodexViewState extends ConsumerState<CodexView>
               ),
               const SizedBox(width: 6),
               Text(
-                '收藏',
+                context.l10n.favorites,
                 style: context.texts.labelMedium!.copyWith(
                   fontWeight: FontWeight.w600,
                   color: scheme.onSurfaceVariant,
@@ -335,21 +382,23 @@ class _CodexViewState extends ConsumerState<CodexView>
   }
 
   /// 分类胶囊:点开层级树选;已选时显示末级名 + 清除叉,主色实底标记。
-  Widget _catButton(CodexData d) {
+  /// 有屏蔽生效时名字后带闭眼 + 屏蔽数。
+  Widget _catButton(CodexData d, CodexMeta meta, CodexBlock block) {
     final scheme = context.scheme;
     final on = _catPath.isNotEmpty;
-    final label = on ? _catPath.last : '全部分类';
+    final label = on ? _catPath.last : context.l10n.allCategories;
     return Material(
-      color: on ? scheme.primary : scheme.surfaceContainerHigh,
+      color: on ? scheme.primary : context.pageControlFill,
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
         borderRadius: BorderRadius.circular(20),
         onTap: () async {
           final picked = await showCodexCategorySheet(
             context,
+            meta.id,
             d.effectiveTree,
             _catPath,
-            d.entries.length,
+            _browseEntries(d),
           );
           if (picked != null && mounted) setState(() => _catPath = picked);
         },
@@ -375,6 +424,23 @@ class _CodexViewState extends ConsumerState<CodexView>
                   ),
                 ),
               ),
+              if (block.active) ...[
+                const SizedBox(width: 6),
+                Icon(
+                  Icons.visibility_off_outlined,
+                  size: 14,
+                  color: on ? scheme.onPrimary : scheme.primary,
+                ),
+                const SizedBox(width: 3),
+                Text(
+                  '${block.paths.length}',
+                  style: mono(
+                    context,
+                    size: 11,
+                    color: on ? scheme.onPrimary : scheme.primary,
+                  ),
+                ),
+              ],
               const SizedBox(width: 4),
               if (on)
                 InkWell(
@@ -403,13 +469,17 @@ class _CodexViewState extends ConsumerState<CodexView>
   ) {
     final scheme = context.scheme;
     return Material(
-      color: scheme.surfaceContainerHigh,
+      color: context.pageControlFill,
       borderRadius: BorderRadius.circular(20),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () {
           if (entries.isEmpty) {
-            hintSnack(context, '当前没有可抽的词条', icon: Icons.casino_outlined);
+            hintSnack(
+              context,
+              context.l10n.nothingToDraw,
+              icon: Icons.casino_outlined,
+            );
             return;
           }
           showCodexRandomSheet(context, meta, media, entries);
@@ -426,7 +496,7 @@ class _CodexViewState extends ConsumerState<CodexView>
               ),
               const SizedBox(width: 6),
               Text(
-                '随机',
+                context.l10n.random,
                 style: context.texts.labelMedium!.copyWith(
                   fontWeight: FontWeight.w600,
                   color: scheme.onSurfaceVariant,
@@ -443,49 +513,51 @@ class _CodexViewState extends ConsumerState<CodexView>
   /// 上面的筛选(上万条逐条比对)不跟着每帧重跑。
   Widget _grid(CodexMeta meta, CodexMedia media, List<CodexEntry> entries) =>
       pinchLayer(
-        child: pinchBuilder((_) {
-          // 例图按落定列数下的列宽解码(gridColumns 在换档过渡中是起点那一档)
-          final cols = gridColumns;
-          final decodeW =
-              (MediaQuery.sizeOf(context).width -
-                  _edge * 2 -
-                  _gap * (cols - 1)) /
-              cols;
-          return CustomScrollView(
-            key: ValueKey(meta.id), // 换法典即换一份列表,从那部的滚动账上落位
-            controller: _scroll,
-            physics: pinchPhysics(const AlwaysScrollableScrollPhysics()),
-            slivers: [
-              // 顶部不留边:筛选行自带下外边距,再留一道就叠出双倍空隙
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(_edge, 0, _edge, _gap),
-                sliver: SliverGrid(
-                  gridDelegate: zoomGridDelegate(
-                    (n) => _masonry.delegate(entries, n),
-                  ),
-                  delegate: SliverChildBuilderDelegate(
-                    (_, i) => CodexCard(
-                      codex: meta,
-                      entry: entries[i],
-                      media: media,
-                      decodeWidth: decodeW,
-                      // 详情页左右滑动就在当前筛选出的这一整批里翻
-                      onTap: () => showCodexDetailSheet(
-                        context,
-                        meta,
-                        media,
-                        entries: entries,
-                        index: i,
-                      ),
+        child: FastScrollHandle(
+          child: pinchBuilder((_) {
+            // 例图按落定列数下的列宽解码(gridColumns 在换档过渡中是起点那一档)
+            final cols = gridColumns;
+            final decodeW =
+                (MediaQuery.sizeOf(context).width -
+                    _edge * 2 -
+                    _gap * (cols - 1)) /
+                cols;
+            return CustomScrollView(
+              key: ValueKey(meta.id), // 换法典即换一份列表,从那部的滚动账上落位
+              controller: _scroll,
+              physics: pinchPhysics(const AlwaysScrollableScrollPhysics()),
+              slivers: [
+                // 顶部不留边:筛选行自带下外边距,再留一道就叠出双倍空隙
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(_edge, 0, _edge, _gap),
+                  sliver: SliverGrid(
+                    gridDelegate: zoomGridDelegate(
+                      (n) => _masonry.delegate(entries, n),
                     ),
-                    childCount: entries.length,
+                    delegate: SliverChildBuilderDelegate(
+                      (_, i) => CodexCard(
+                        codex: meta,
+                        entry: entries[i],
+                        media: media,
+                        decodeWidth: decodeW,
+                        // 详情页左右滑动就在当前筛选出的这一整批里翻
+                        onTap: () => showCodexDetailSheet(
+                          context,
+                          meta,
+                          media,
+                          entries: entries,
+                          index: i,
+                        ),
+                      ),
+                      childCount: entries.length,
+                    ),
                   ),
                 ),
-              ),
-              const SliverToBoxAdapter(child: SizedBox(height: 20)),
-            ],
-          );
-        }),
+                const SliverToBoxAdapter(child: SizedBox(height: 20)),
+              ],
+            );
+          }),
+        ),
       );
 
   Widget _error(String text, VoidCallback onRetry) {
@@ -507,7 +579,11 @@ class _CodexViewState extends ConsumerState<CodexView>
             ),
           ),
           const SizedBox(height: 10),
-          FilledButton.tonal(onPressed: onRetry, child: const Text('重试')),
+          FilledButton.tonal(
+            onPressed: onRetry,
+            style: context.pageTonalStyle,
+            child: Text(context.l10n.retry),
+          ),
         ],
       ),
     );
@@ -552,8 +628,7 @@ CodexMeta resolveSelectedCodex(List<CodexMeta> index, String? sel) {
   return sfw.isNotEmpty ? sfw.first : index.first;
 }
 
-/// 「选择主法典」按钮:显示当前法典标题,点开选择器换法典。
-/// 放在灵感页法典模式顶栏右侧的空位,替代原 CodexView 头部整行。
+/// 「选择主法典」:法典页搜索框上面那行标题,写当前法典名与条数,点开换法典。
 /// 换法典只改 [selectedCodexProvider],正文的分类筛选由 CodexView 监听联动重置。
 class CodexPickerButton extends ConsumerWidget {
   const CodexPickerButton({super.key});
@@ -562,47 +637,59 @@ class CodexPickerButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = context.scheme;
     final index = ref.watch(codexIndexProvider).value;
-    if (index == null || index.isEmpty) return const SizedBox(height: 44);
+    if (index == null || index.isEmpty) return const SizedBox(height: 40);
     final meta = resolveSelectedCodex(index, ref.watch(selectedCodexProvider));
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(22),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () async {
-          final id = await showCodexPickerSheet(context, index, meta.id);
-          if (id != null) {
-            ref.read(selectedCodexProvider.notifier).select(id);
-          }
-        },
-        child: Container(
-          height: 44,
-          padding: const EdgeInsets.fromLTRB(14, 0, 8, 0),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  meta.displayTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.texts.titleSmall!.copyWith(
-                    fontWeight: FontWeight.w800,
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () async {
+        final id = await showCodexPickerSheet(context, index, meta.id);
+        if (id != null) {
+          ref.read(selectedCodexProvider.notifier).select(id);
+        }
+      },
+      child: SizedBox(
+        height: 40,
+        child: Row(
+          children: [
+            Icon(Icons.menu_book_outlined, size: 19, color: scheme.primary),
+            const SizedBox(width: 8),
+            // 整行都给了标题:写全名(选择器里那个是缩短的)。标题与箭头一组
+            // 吃掉条数以外的全部宽度 —— Flexible 配 Spacer 会把余量对半分,
+            // 标题只拿得到一半
+            Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      meta.title.isNotEmpty ? meta.title : meta.displayTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.texts.titleMedium!.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
-                ),
+                  if (meta.nsfw) ...[
+                    const SizedBox(width: 6),
+                    _miniTag(context, 'R18', scheme.error),
+                  ],
+                  const SizedBox(width: 2),
+                  Icon(
+                    Icons.keyboard_arrow_down,
+                    size: 20,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ],
               ),
-              if (meta.nsfw) ...[
-                const SizedBox(width: 6),
-                _miniTag(context, 'R18', scheme.error),
-              ],
-              const SizedBox(width: 4),
-              Icon(
-                Icons.keyboard_arrow_down,
-                size: 20,
+            ),
+            const SizedBox(width: 10),
+            Text(
+              context.l10n.itemsN(meta.entryCount),
+              style: context.texts.labelMedium!.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

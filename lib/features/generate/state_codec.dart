@@ -90,22 +90,8 @@ Future<EncodedState> encodeGenerateState(
     if (s.negativePromptRaw.isNotEmpty)
       'negativePromptRaw': s.negativePromptRaw,
     // 主提示词分区:没分区就不写(生成快照里已拼进 prompt,也不会带这个键)
-    if (s.sections.isNotEmpty)
-      'sections': [
-        for (final x in s.sections)
-          x.isMain
-              ? {'id': x.id, 'name': x.name, if (!x.enabled) 'enabled': false}
-              : {
-                  'id': x.id,
-                  'name': x.name,
-                  'positive': x.positive,
-                  'negative': x.negative,
-                  if (x.positiveRaw.isNotEmpty) 'positiveRaw': x.positiveRaw,
-                  if (x.negativeRaw.isNotEmpty) 'negativeRaw': x.negativeRaw,
-                  if (!x.enabled) 'enabled': false,
-                  if (x.artist) 'artist': true,
-                },
-      ],
+    if (s.sections.isNotEmpty) 'sections': encodeSections(s.sections),
+    if (s.usedEntries.isNotEmpty) 'usedEntries': s.usedEntries,
     'characters': [
       for (final c in s.characters)
         {
@@ -119,6 +105,7 @@ Future<EncodedState> encodeGenerateState(
           if (c.position != null) 'position': c.position,
           'activeTab': c.activeTab.name,
           if (c.avatar != null) 'avatar': c.avatar,
+          if (c.source != null) 'source': c.source,
         },
     ],
     'vibes': vibes,
@@ -265,13 +252,20 @@ Future<EncodedState> encodeGenerateState(
 
 /// [presetFallback]:存的时候还没记提示词预设的(1.1.1 及以前的存档和图库
 /// 快照)用哪一档;不给就用 [kDefaultPromptPresetId]。
+///
+/// [images]:几份状态一起解码时共用的读图表(哈希 → 字节),同一张图只读一次、
+/// 只留一份字节。
 Future<GenerateState> decodeGenerateState(
   Map<String, dynamic> j,
   BlobStore blobs, {
   String? presetFallback,
+  Map<String, Future<Uint8List?>>? images,
 }) async {
-  Future<Uint8List?> img(Object? hash) async =>
-      hash is String && hash.isNotEmpty ? blobs.get(hash) : null;
+  Future<Uint8List?> img(Object? hash) async {
+    if (hash is! String || hash.isEmpty) return null;
+    if (images == null) return blobs.get(hash);
+    return images.putIfAbsent(hash, () => blobs.get(hash));
+  }
 
   final characters = <CharacterPrompt>[];
   if (j['characters'] is List) {
@@ -296,6 +290,7 @@ Future<GenerateState> decodeGenerateState(
           activeTab:
               _enumByName(CharTab.values, e['activeTab']) ?? CharTab.positive,
           avatar: e['avatar'] is String ? e['avatar'] as String : null,
+          source: e['source'] is String ? e['source'] as String : null,
         ),
       );
     }
@@ -512,7 +507,7 @@ Future<GenerateState> decodeGenerateState(
       inpaint = InpaintJob(
         image: image,
         mask: mask,
-        strength: (e['strength'] as num?)?.toDouble() ?? 0.7,
+        strength: (e['strength'] as num?)?.toDouble() ?? 1,
         paste: paste,
         sourceId: e['sourceId'] as String?,
         grid: await img(e['grid']),
@@ -551,7 +546,8 @@ Future<GenerateState> decodeGenerateState(
     negativePromptRaw: j['negativePromptRaw'] is String
         ? j['negativePromptRaw'] as String
         : '',
-    sections: _decodeSections(j['sections']),
+    sections: decodeSections(j['sections']),
+    usedEntries: _strings(j['usedEntries']),
     characters: characters,
     vibes: vibes,
     charRefs: charRefs,
@@ -615,7 +611,24 @@ List<ActiveLora> _decodeLoras(Object? raw) {
   ];
 }
 
-List<PromptSection> _decodeSections(Object? raw) {
+List<Map<String, dynamic>> encodeSections(List<PromptSection> sections) => [
+  for (final x in sections)
+    x.isMain
+        ? {'id': x.id, 'name': x.name, if (!x.enabled) 'enabled': false}
+        : {
+            'id': x.id,
+            'name': x.name,
+            'positive': x.positive,
+            'negative': x.negative,
+            if (x.positiveRaw.isNotEmpty) 'positiveRaw': x.positiveRaw,
+            if (x.negativeRaw.isNotEmpty) 'negativeRaw': x.negativeRaw,
+            if (!x.enabled) 'enabled': false,
+            if (x.artist) 'artist': true,
+            if (x.sources.isNotEmpty) 'sources': x.sources,
+          },
+];
+
+List<PromptSection> decodeSections(Object? raw) {
   if (raw is! List) return const [];
   String str(Object? v) => v is String ? v : '';
   final out = <PromptSection>[];
@@ -640,8 +653,16 @@ List<PromptSection> _decodeSections(Object? raw) {
               negativeRaw: str(e['negativeRaw']),
               enabled: e['enabled'] != false,
               artist: e['artist'] == true,
+              sources: _strings(e['sources']),
             ),
     );
   }
   return normalizeSections(out);
 }
+
+List<String> _strings(Object? raw) => raw is List
+    ? [
+        for (final x in raw)
+          if (x is String && x.isNotEmpty) x,
+      ]
+    : const [];

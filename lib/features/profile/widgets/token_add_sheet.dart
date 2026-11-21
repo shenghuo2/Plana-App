@@ -12,6 +12,7 @@ import '../../../core/net/nai_proxy.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
 import 'token_status.dart';
+import '../../../l10n/l10n.dart';
 
 /// 添加令牌弹层。返回 true = 加进去了。
 ///
@@ -36,6 +37,8 @@ Future<bool> showTokenAddSheet(BuildContext context) async =>
 
 enum _AddMode { paste, login, third }
 
+enum _ThirdPartyMode { nai, openai, proxy }
+
 class _TokenAddSheet extends ConsumerStatefulWidget {
   const _TokenAddSheet();
 
@@ -45,6 +48,7 @@ class _TokenAddSheet extends ConsumerStatefulWidget {
 
 class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
   _AddMode _mode = _AddMode.paste;
+  _ThirdPartyMode _thirdMode = _ThirdPartyMode.nai;
 
   final _token = TextEditingController();
   final _email = TextEditingController();
@@ -54,7 +58,6 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
   bool _obscureToken = true;
   bool _obscurePw = true;
   bool _obscureThird = true;
-  bool _proxyApi = false;
   bool _busy = false;
   String? _error;
 
@@ -127,7 +130,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     if (added == null) {
       setState(() {
         _busy = false;
-        _error = '最多保存 $kMaxNaiKeys 把令牌';
+        _error = context.l10n.maxTokensSaved(kMaxNaiKeys);
       });
       return;
     }
@@ -165,7 +168,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _error = '登录失败:$e';
+        _error = context.l10n.loginFailed('$e');
       });
     }
   }
@@ -176,11 +179,15 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
   /// 通用中转不探测;选 API Proxy 时用其受支持的 `/quota` 验证客户端 key。
   Future<void> _addThird() async {
     final t = _thirdKey.text.trim();
-    final url = normalizeNaiBase(_url.text);
-    final proxyApi = _proxyApi;
+    final proxyApi = _thirdMode == _ThirdPartyMode.proxy;
+    final url = switch (_thirdMode) {
+      _ThirdPartyMode.nai => naiEndpointFor(_url.text, NaiApiFormat.nai),
+      _ThirdPartyMode.openai => naiEndpointFor(_url.text, NaiApiFormat.openai),
+      _ThirdPartyMode.proxy => normalizeNaiBase(_url.text),
+    };
     if (t.isEmpty || _busy) return;
     if (url.isEmpty || !naiBaseLooksValid(url)) {
-      setState(() => _error = '请填 http:// 或 https:// 开头的接口地址');
+      setState(() => _error = context.l10n.urlNeedsHttp);
       return;
     }
     FocusScope.of(context).unfocus();
@@ -208,7 +215,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     if (added == null) {
       setState(() {
         _busy = false;
-        _error = '最多保存 $kMaxNaiKeys 把令牌';
+        _error = context.l10n.maxTokensSaved(kMaxNaiKeys);
       });
       return;
     }
@@ -267,7 +274,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              '添加令牌',
+              context.l10n.addToken,
               style: context.texts.titleMedium!.copyWith(
                 fontWeight: FontWeight.w700,
               ),
@@ -276,10 +283,19 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
             SizedBox(
               width: double.infinity,
               child: SegmentedButton<_AddMode>(
-                segments: const [
-                  ButtonSegment(value: _AddMode.paste, label: Text('粘贴令牌')),
-                  ButtonSegment(value: _AddMode.login, label: Text('邮箱登录')),
-                  ButtonSegment(value: _AddMode.third, label: Text('第三方')),
+                segments: [
+                  ButtonSegment(
+                    value: _AddMode.paste,
+                    label: Text(context.l10n.pasteToken),
+                  ),
+                  ButtonSegment(
+                    value: _AddMode.login,
+                    label: Text(context.l10n.emailLogin),
+                  ),
+                  ButtonSegment(
+                    value: _AddMode.third,
+                    label: Text(context.l10n.thirdParty),
+                  ),
                 ],
                 selected: {_mode},
                 showSelectedIcon: false,
@@ -327,7 +343,11 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
                         color: scheme.onPrimary,
                       ),
                     )
-                  : Text(_mode == _AddMode.login ? '登录并添加' : '添加'),
+                  : Text(
+                      _mode == _AddMode.login
+                          ? context.l10n.loginAndAdd
+                          : context.l10n.add,
+                    ),
             ),
           ],
         ),
@@ -341,10 +361,10 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     children: [
       Text(
         [
-          'NovelAI 网站 → User Settings → Account → Get Persistent API Token。',
+          context.l10n.tokenWhere,
           // 开了代理就不必自己够得着官网
-          if (!ref.watch(naiProxyProvider)) '直连生成需要你的网络可以访问 NovelAI 官网。',
-        ].join(),
+          if (!ref.watch(naiProxyProvider)) context.l10n.needNaiAccess,
+        ].join(context.l10n.sentenceJoin),
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),
       ),
       const SizedBox(height: 12),
@@ -360,14 +380,14 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
         keyboardType: TextInputType.visiblePassword,
         style: mono(context, size: 13),
         decoration: _dec(
-          '粘贴 pst-… 令牌或网页 eyJ… JWT',
+          context.l10n.pasteTokenHint,
           suffix: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
                 onPressed: () => _paste(_token),
                 icon: const Icon(Icons.content_paste, size: 20),
-                tooltip: '粘贴',
+                tooltip: context.l10n.paste,
                 color: scheme.onSurfaceVariant,
               ),
               IconButton(
@@ -376,7 +396,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
                   _obscureToken ? Icons.visibility : Icons.visibility_off,
                   size: 20,
                 ),
-                tooltip: _obscureToken ? '显示' : '隐藏',
+                tooltip: _obscureToken ? context.l10n.show : context.l10n.hide,
                 color: scheme.onSurfaceVariant,
               ),
             ],
@@ -388,7 +408,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       tokenStatusLine(context, _probe, onRetry: () => _probe.run(_token.text)),
       const SizedBox(height: 2),
       Text(
-        '仅加密存储在本机',
+        context.l10n.storedEncryptedLocal,
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),
       ),
     ],
@@ -401,30 +421,55 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     key: const ValueKey('third'),
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Text(
-        _proxyApi
-            ? '填写 NovelAI API Proxy 根地址和管理员签发的客户端 key。'
-                  '保存时验证 /quota,官方 Token 不会交给代理。'
-            : '兼容 NovelAI 接口的中转站或自建反代',
-        style: context.texts.labelSmall!.copyWith(color: scheme.outline),
-      ),
-      const SizedBox(height: 12),
-      SizedBox(
-        width: double.infinity,
-        child: SegmentedButton<bool>(
-          segments: const [
-            ButtonSegment(value: false, label: Text('通用中转')),
-            ButtonSegment(value: true, label: Text('API Proxy')),
-          ],
-          selected: {_proxyApi},
-          showSelectedIcon: false,
-          onSelectionChanged: _busy
-              ? null
-              : (v) => setState(() {
-                  _proxyApi = v.first;
+      SegmentedButton<_ThirdPartyMode>(
+        segments: [
+          ButtonSegment(
+            value: _ThirdPartyMode.nai,
+            label: Text(
+              NaiApiFormat.nai.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          ButtonSegment(
+            value: _ThirdPartyMode.openai,
+            label: Text(
+              NaiApiFormat.openai.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const ButtonSegment(
+            value: _ThirdPartyMode.proxy,
+            label: Text(
+              'API Proxy',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+        selected: {_thirdMode},
+        showSelectedIcon: false,
+        onSelectionChanged: _busy
+            ? null
+            : (v) {
+                setState(() {
+                  _thirdMode = v.first;
                   _error = null;
-                }),
-        ),
+                });
+                Haptics.selection();
+              },
+      ),
+      const SizedBox(height: 8),
+      Text(
+        switch (_thirdMode) {
+          _ThirdPartyMode.nai => NaiApiFormat.nai.hint,
+          _ThirdPartyMode.openai => NaiApiFormat.openai.hint,
+          _ThirdPartyMode.proxy =>
+            '填写 NovelAI API Proxy 根地址和管理员签发的客户端 key。'
+                '保存时验证 /quota,官方 Token 不会交给代理。',
+        },
+        style: context.texts.labelSmall!.copyWith(color: scheme.outline),
       ),
       const SizedBox(height: 12),
       TextField(
@@ -437,11 +482,15 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
         textInputAction: TextInputAction.next,
         style: mono(context, size: 13),
         decoration: _dec(
-          _proxyApi ? 'https://nai.example.com' : 'https://example.com',
+          switch (_thirdMode) {
+            _ThirdPartyMode.nai => 'https://example.com',
+            _ThirdPartyMode.openai => 'https://example.com/v1',
+            _ThirdPartyMode.proxy => 'https://nai.example.com',
+          },
           suffix: IconButton(
             onPressed: () => _paste(_url),
             icon: const Icon(Icons.content_paste, size: 20),
-            tooltip: '粘贴',
+            tooltip: context.l10n.paste,
             color: scheme.onSurfaceVariant,
           ),
         ),
@@ -458,14 +507,14 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
         keyboardType: TextInputType.visiblePassword,
         style: mono(context, size: 13),
         decoration: _dec(
-          '接口 key',
+          context.l10n.apiKey,
           suffix: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
                 onPressed: () => _paste(_thirdKey),
                 icon: const Icon(Icons.content_paste, size: 20),
-                tooltip: '粘贴',
+                tooltip: context.l10n.paste,
                 color: scheme.onSurfaceVariant,
               ),
               IconButton(
@@ -474,7 +523,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
                   _obscureThird ? Icons.visibility : Icons.visibility_off,
                   size: 20,
                 ),
-                tooltip: _obscureThird ? '显示' : '隐藏',
+                tooltip: _obscureThird ? context.l10n.show : context.l10n.hide,
                 color: scheme.onSurfaceVariant,
               ),
             ],
@@ -483,7 +532,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       ),
       const SizedBox(height: 10),
       Text(
-        '仅加密存储在本机',
+        context.l10n.storedEncryptedLocal,
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),
       ),
     ],
@@ -494,8 +543,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Text(
-        '密码只在本机参与密钥计算,不上传也不保存;'
-        '登录得到 30 天有效的令牌,到期前 App 会自动换新。',
+        context.l10n.passwordLocalHint,
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),
       ),
       const SizedBox(height: 12),
@@ -508,7 +556,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
         keyboardType: TextInputType.emailAddress,
         textInputAction: TextInputAction.next,
         autofillHints: const [AutofillHints.email],
-        decoration: _dec('邮箱'),
+        decoration: _dec(context.l10n.email),
       ),
       const SizedBox(height: 10),
       TextField(
@@ -522,7 +570,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
         autofillHints: const [AutofillHints.password],
         onSubmitted: (_) => _login(),
         decoration: _dec(
-          '密码',
+          context.l10n.password,
           suffix: IconButton(
             onPressed: () => setState(() => _obscurePw = !_obscurePw),
             icon: Icon(

@@ -82,6 +82,149 @@ String _dropSeen(String text, Set<String> seen) {
   return _clean(kept.join(','));
 }
 
+/// 去重比对用的键:普通词按 [cleanPromptToken],带记号的按原样(空白归一)。
+String _wordKey(String piece) {
+  final t = piece.trim();
+  if (!_syntax.hasMatch(t)) return 'p:${cleanPromptToken(t)}';
+  return 's:${t.replaceAll(RegExp(r'\s+'), ' ').toLowerCase()}';
+}
+
+/// 逗号切开,标出哪几段是能整段拿掉的顶层词:不在 `{}` `[]` `::` 组里,
+/// 自身记号也收了口。
+List<(String, bool)> _topPieces(String text) {
+  final out = <(String, bool)>[];
+  var depth = 0;
+  var inWeight = false;
+  for (final piece in text.split(RegExp(r'[,，]'))) {
+    final top = depth == 0 && !inWeight;
+    var d = 0;
+    var tildes = 0;
+    for (final c in piece.split('')) {
+      if (c == '{' || c == '[') d++;
+      if (c == '}' || c == ']') d--;
+      if (c == '~') tildes++;
+    }
+    final weights = '::'.allMatches(piece).length;
+    depth += d;
+    if (weights.isOdd) inWeight = !inWeight;
+    out.add((
+      piece,
+      top &&
+          d == 0 &&
+          weights.isEven &&
+          tildes.isEven &&
+          piece.trim().isNotEmpty,
+    ));
+  }
+  return out;
+}
+
+/// 从 [text] 里拿掉启用的格子里已有的顶层词。[main] 是主体那一侧的词,
+/// [withMain] 为 false 时主体不算。
+String dropSectionWords(
+  String text,
+  List<PromptSection> sections,
+  String main, {
+  required bool positive,
+  bool withMain = false,
+}) {
+  if (text.trim().isEmpty) return text;
+  final have = <String>{
+    for (final s in _withMain(sections))
+      if ((withMain || !s.isMain) && _on(s, positive: positive))
+        for (final (p, top) in _topPieces(
+          s.isMain ? main : (positive ? s.positive : s.negative),
+        ))
+          if (top) _wordKey(p),
+  };
+  if (have.isEmpty) return text;
+  return _clean(
+    [
+      for (final (p, top) in _topPieces(text))
+        if (!top || !have.contains(_wordKey(p))) p,
+    ].join(','),
+  );
+}
+
+/// AI 助手的提议写进创作页的方式。
+enum SectionImport {
+  /// 只换主体,分区留着;分区里已有的词不再写进主体。
+  main,
+
+  /// 接在最后新建一格,原有的不动;已有的词不再写进这一格。
+  newSection,
+
+  /// 分区整列清掉,整份写进主体。
+  clear,
+}
+
+/// 一组正负向按 [mode] 写进 [s]。导入和「直接生成」共用,两条路出同一张图。
+/// [sectionName] 是「新建分区」那一格的名字。
+GenerateState importPromptsInto(
+  GenerateState s,
+  String positive,
+  String negative,
+  SectionImport mode, {
+  required String Function() newId,
+  String sectionName = 'AI',
+}) {
+  final mainMode = mode == SectionImport.main && s.sections.isNotEmpty;
+  if (mode == SectionImport.newSection) {
+    final pos = dropSectionWords(
+      positive,
+      s.sections,
+      s.prompt,
+      positive: true,
+      withMain: true,
+    );
+    final neg = dropSectionWords(
+      negative,
+      s.sections,
+      s.negativePrompt,
+      positive: false,
+      withMain: true,
+    );
+    if (pos.trim().isEmpty && neg.trim().isEmpty) return s;
+    final rows = s.sections.isEmpty
+        ? const [PromptSection.main()]
+        : withMainRow(s.sections, s.prompt);
+    return s.copyWith(
+      sections: [
+        ...rows,
+        PromptSection(
+          id: newId(),
+          name: sectionName,
+          positive: pos,
+          negative: neg,
+        ),
+      ],
+    );
+  }
+  final pos = mainMode
+      ? dropSectionWords(positive, s.sections, s.prompt, positive: true)
+      : positive;
+  final neg = mainMode
+      ? dropSectionWords(
+          negative,
+          s.sections,
+          s.negativePrompt,
+          positive: false,
+        )
+      : negative;
+  return s.copyWith(
+    prompt: pos,
+    promptRaw: pos == s.prompt ? s.promptRaw : '',
+    negativePrompt: neg,
+    negativePromptRaw: neg == s.negativePrompt ? s.negativePromptRaw : '',
+    sections: !mainMode
+        ? const []
+        : [
+            for (final x in withMainRow(s.sections, pos))
+              x.isMain && pos.trim().isNotEmpty ? x.copyWith(enabled: true) : x,
+          ],
+  );
+}
+
 /// 同 [joinSections],拼的是编辑器草稿(带折叠 / 禁用)。草稿过期的那一格
 /// 退回定稿,与载入编辑器时同一口径。
 String _joinDrafts(
@@ -103,9 +246,15 @@ String _joinDrafts(
 /// 生成快照:分区拼进主提示词,快照里不再带分区。
 ///
 /// 入库、「重新生成」、图库搜索、图片元数据都按这一整串走,和发给 NAI 的一致;
-/// 草稿也照样拼一份,导回创作页时折叠还在。没有分区原样返回。
+/// 草稿也照样拼一份,导回创作页时折叠还在。拼进去的那几格记在
+/// [GenerateState.composedSections],它们来自的灵感库条目记在
+/// [GenerateState.usedEntries]。没有分区原样返回。
 GenerateState composeSections(GenerateState s) {
-  if (s.sections.isEmpty) return s;
+  if (s.sections.isEmpty) {
+    return s.composedSections.isEmpty && s.usedEntries.isEmpty
+        ? s
+        : s.copyWith(composedSections: const [], usedEntries: const []);
+  }
   final pos = joinSections(s.sections, s.prompt, positive: true);
   final neg = joinSections(s.sections, s.negativePrompt, positive: false);
   final posDraft = _joinDrafts(
@@ -127,7 +276,109 @@ GenerateState composeSections(GenerateState s) {
     promptRaw: draft(posDraft, pos),
     negativePromptRaw: draft(negDraft, neg),
     sections: const [],
+    usedEntries: {
+      for (final x in s.sections)
+        if (!x.isMain && x.enabled && _clean(x.positive).isNotEmpty)
+          ...x.sources,
+    }.toList(),
+    composedSections: [
+      for (final x in _withMain(s.sections))
+        if (x.isMain)
+          PromptSection(
+            id: kMainSectionId,
+            name: x.name,
+            positive: x.enabled ? _clean(s.prompt) : '',
+            negative: _clean(s.negativePrompt),
+          )
+        else if (x.enabled)
+          PromptSection(
+            id: x.id,
+            name: x.name,
+            positive: _clean(x.positive),
+            negative: _clean(x.negative),
+            artist: x.artist,
+          ),
+    ],
   );
+}
+
+/// 读图导入的分区按 [append] 写进 [s]。[rows] 是图里存的那几格(主体的词写在
+/// 主体行里);[mainNegative] 为 null 时负面不动。
+///
+/// 完全覆盖:主提示词换成这几格,主体没选就空着。新建分区:每格接在最后,
+/// 主体那格叫「分区 N」,已有的词不再写进去(同 [importPromptsInto]);
+/// [mainNegative] 跟着主体那格走,主体没选就跟第一格。
+GenerateState importSectionsInto(
+  GenerateState s,
+  List<PromptSection> rows, {
+  String? mainNegative,
+  required bool append,
+  required String Function() newId,
+}) {
+  if (!append) {
+    final main = rows.where((x) => x.isMain).firstOrNull;
+    return s.copyWith(
+      prompt: main?.positive ?? '',
+      promptRaw: '',
+      negativePrompt: mainNegative,
+      negativePromptRaw: mainNegative == null ? null : '',
+      sections: normalizeSections([
+        for (final x in rows)
+          x.isMain
+              ? PromptSection.main(name: x.name)
+              : PromptSection(
+                  id: newId(),
+                  name: x.name,
+                  positive: x.positive,
+                  negative: x.negative,
+                  artist: x.artist,
+                ),
+      ]),
+    );
+  }
+  final hasMain = rows.any((x) => x.isMain);
+  var out = s;
+  for (var i = 0; i < rows.length; i++) {
+    final x = rows[i];
+    final neg = x.isMain
+        ? mainNegative ?? ''
+        : !hasMain && i == 0 && mainNegative != null
+        ? [
+            mainNegative,
+            x.negative,
+          ].map(_clean).where((p) => p.isNotEmpty).join(', ')
+        : x.negative;
+    final next = importPromptsInto(
+      out,
+      x.positive,
+      neg,
+      SectionImport.newSection,
+      newId: newId,
+      sectionName: x.isMain
+          ? nextSectionName(
+              out.sections.isEmpty
+                  ? const [PromptSection.main()]
+                  : withMainRow(out.sections, out.prompt),
+            )
+          : x.name,
+    );
+    if (identical(next, out)) continue;
+    out = x.artist
+        ? next.copyWith(
+            sections: [
+              ...next.sections.take(next.sections.length - 1),
+              PromptSection(
+                id: next.sections.last.id,
+                name: next.sections.last.name,
+                positive: next.sections.last.positive,
+                negative: next.sections.last.negative,
+                artist: true,
+              ),
+            ],
+          )
+        : next;
+  }
+  return out;
 }
 
 /// token 读数要算进去的分区词(启用、不含主体),[except] 那一格除外
@@ -233,24 +484,12 @@ GenerateState? mergeSectionsIn(GenerateState s, Set<String> ids) {
                 negative: n,
                 negativeRaw: draftOf(nDraft, n),
                 enabled: on,
+                sources: {for (final y in picked) ...y.sources}.toList(),
               )
             : x,
     ]),
   );
 }
-
-/// 新画布沿用的骨架:名字、顺序、开关留着,词清空。
-List<PromptSection> sectionSkeleton(List<PromptSection> list) => [
-  for (final s in list)
-    s.isMain
-        ? PromptSection.main(name: s.name)
-        : PromptSection(
-            id: s.id,
-            name: s.name,
-            enabled: s.enabled,
-            artist: s.artist,
-          ),
-];
 
 /// 新分区的默认名「分区 N」,N 取第一个没被占用的序号。
 String nextSectionName(List<PromptSection> list) {
@@ -277,8 +516,8 @@ List<PromptSection> restoreSection(
   return normalizeSections(out);
 }
 
-/// 灵感库条目各自成一格,不折叠:名字取条目名(调用方换成分类名),正负向原样
-/// 放进这一格。新格子一律接在最后,按加进来的先后往下排 —— 别按分类插到
+/// 灵感库条目各自成一格,不折叠:名字取条目名,正负向原样
+/// 放进这一格,条目 id 记进 [PromptSection.sources]。新格子一律接在最后,按加进来的先后往下排 —— 别按分类插到
 /// 主体前后,那样主体看着像在跳。
 ///
 /// 去重同以前追加时:词已经全在提示词里的跳过;同名同词的格子已经在
@@ -300,7 +539,10 @@ List<PromptSection> withEntrySections(
       (s) => !s.isMain && s.name.trim() == name && s.positive.trim() == pos,
     );
     if (same >= 0) {
-      out[same] = out[same].copyWith(enabled: true);
+      out[same] = out[same].copyWith(
+        enabled: true,
+        sources: {...out[same].sources, e.id}.toList(),
+      );
       continue;
     }
     final toks = tokenizeSet(pos);
@@ -314,6 +556,7 @@ List<PromptSection> withEntrySections(
       negative: neg,
       negativeRaw: draftOf(rawNeg, neg),
       artist: e.category == TagCategory.artist,
+      sources: [e.id],
     );
     out.add(sec);
   }

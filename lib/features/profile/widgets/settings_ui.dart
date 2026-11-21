@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 
 /// 设置类页面共用版式:分组卡 + 单行条目。
@@ -11,22 +12,25 @@ class SettingsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        children: [
-          for (var i = 0; i < children.length; i++) ...[
-            if (i > 0)
-              Divider(
-                height: 1,
-                indent: 48,
-                color: scheme.outlineVariant.withValues(alpha: .35),
-              ),
-            children[i],
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          children: [
+            for (var i = 0; i < children.length; i++) ...[
+              if (i > 0)
+                Divider(
+                  height: 1,
+                  indent: 48,
+                  color: scheme.outlineVariant.withValues(alpha: .35),
+                ),
+              children[i],
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -62,6 +66,7 @@ class SettingsRow extends StatelessWidget {
     this.value,
     this.valueColor,
     this.onTap,
+    this.dropdown = false,
   });
 
   final IconData icon;
@@ -70,6 +75,9 @@ class SettingsRow extends StatelessWidget {
   final Color? valueColor;
   final VoidCallback? onTap;
 
+  /// 外面包着下拉菜单:箭头换成朝下,点击交给菜单。
+  final bool dropdown;
+
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
@@ -77,33 +85,45 @@ class SettingsRow extends StatelessWidget {
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-        child: Row(
-          children: [
-            Icon(icon, size: 20, color: scheme.onSurfaceVariant),
-            const SizedBox(width: 12),
-            Text(
-              title,
-              style: context.texts.bodyMedium!.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                value ?? '',
-                textAlign: TextAlign.end,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.texts.bodySmall!.copyWith(
-                  color: valueColor ?? scheme.onSurfaceVariant,
+        child: LayoutBuilder(
+          builder: (context, cons) => Row(
+            children: [
+              Icon(icon, size: 20, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 12),
+              // 标题最多占六成宽(英文标题长),不把右侧的值挤没
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: cons.maxWidth * .6),
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.texts.bodyMedium!.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
-            if (onTap != null) ...[
-              const SizedBox(width: 4),
-              Icon(Icons.chevron_right, size: 18, color: scheme.outline),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  value ?? '',
+                  textAlign: TextAlign.end,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.texts.bodySmall!.copyWith(
+                    color: valueColor ?? scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              if (onTap != null || dropdown) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  dropdown ? Icons.expand_more : Icons.chevron_right,
+                  size: 18,
+                  color: scheme.outline,
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

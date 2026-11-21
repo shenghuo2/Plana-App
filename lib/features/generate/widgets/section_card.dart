@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import 'common.dart';
 
@@ -54,25 +55,46 @@ class SectionCard extends StatelessWidget {
         child: Row(
           children: [
             // 卡头高度下限 = 动作按钮的高度(RoundIconBtn 36 / RefEnableToggle 38)。
-            // 各卡的动作按钮数量不一,没有按钮的卡(如自然语言)收起来会明显
+            // 各卡的动作按钮数量不一,没有按钮的卡收起来会明显
             // 比 LoRA / 重绘放大矮一截 —— 撑一格,所有卡收起时一样高。
             const SizedBox(height: 38),
-            Icon(icon, size: 20, color: scheme.onSurfaceVariant),
+            SkinIcon(icon),
             const SizedBox(width: 9),
-            Text(
-              title,
-              style: context.texts.bodyLarge!.copyWith(
-                fontWeight: FontWeight.w600,
-                color: titleColor,
-              ),
-            ),
-            if (badge != null) ...[const SizedBox(width: 8), badge!],
-            const SizedBox(width: 8),
+            // 标题放不下时省略,内联元素靠右不让
             Expanded(
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  for (final w in inline) ...[w, const SizedBox(width: 6)],
+                  Flexible(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            title,
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.texts.bodyLarge!.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: titleColor,
+                            ),
+                          ),
+                        ),
+                        if (badge != null) ...[
+                          const SizedBox(width: 8),
+                          badge!,
+                        ],
+                      ],
+                    ),
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(width: 8),
+                      for (final w in inline) ...[w, const SizedBox(width: 6)],
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -94,22 +116,25 @@ class SectionCard extends StatelessWidget {
     if (idx != null) {
       header = ReorderableDelayedDragStartListener(index: idx, child: header);
     }
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          header,
-          ExpandBody(
-            expanded: expanded && body != null,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-              child: body ?? const SizedBox(width: double.infinity),
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            header,
+            ExpandBody(
+              expanded: expanded && body != null,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+                child: body ?? const SizedBox(width: double.infinity),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

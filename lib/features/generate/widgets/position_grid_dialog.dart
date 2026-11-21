@@ -4,12 +4,15 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
 import '../../gallery/gallery_state.dart';
 import '../char_position.dart';
 import '../generate_state.dart';
 import '../models.dart';
+import '../../../l10n/l10n.dart';
+import '../display_names.dart';
 
 /// 角色定位弹窗(对齐 web `CharacterPositionModal`)。
 ///
@@ -230,7 +233,7 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '设置角色位置',
+                        context.l10n.position,
                         style: context.texts.titleMedium!.copyWith(
                           fontWeight: FontWeight.w700,
                         ),
@@ -314,7 +317,7 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              '全部自动 (AUTO)',
+                              context.l10n.aiChoiceAll,
                               style: context.texts.bodyMedium!.copyWith(
                                 fontWeight: FontWeight.w600,
                                 color: isAuto
@@ -349,7 +352,7 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                             borderRadius: BorderRadius.circular(23),
                           ),
                         ),
-                        child: const Text('取消'),
+                        child: Text(context.l10n.cancel),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -364,8 +367,8 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                             borderRadius: BorderRadius.circular(23),
                           ),
                         ),
-                        child: const Text(
-                          '确认保存',
+                        child: Text(
+                          context.l10n.savePosition,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -389,8 +392,12 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
   ) {
     final scheme = context.scheme;
     final active = c.id == _selectedId;
+    final solid = active && context.skin.float;
+    final onActive = context.onSolidFill(scheme.onPrimaryContainer);
     return Material(
-      color: active ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+      color: active
+          ? context.solidFill(scheme.primaryContainer)
+          : scheme.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(20),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -404,7 +411,9 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                 width: 18,
                 height: 18,
                 decoration: BoxDecoration(
-                  color: active ? scheme.primary : scheme.outlineVariant,
+                  color: active
+                      ? (solid ? scheme.onPrimary : scheme.primary)
+                      : scheme.outlineVariant,
                   shape: BoxShape.circle,
                 ),
                 child: Center(
@@ -414,7 +423,7 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
                       color: active
-                          ? scheme.onPrimary
+                          ? (solid ? scheme.primary : scheme.onPrimary)
                           : scheme.onSurfaceVariant,
                     ),
                   ),
@@ -422,12 +431,10 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
               ),
               const SizedBox(width: 6),
               Text(
-                c.name,
+                characterDisplayName(context.l10n, c.name),
                 style: context.texts.labelMedium!.copyWith(
                   fontWeight: FontWeight.w600,
-                  color: active
-                      ? scheme.onPrimaryContainer
-                      : scheme.onSurfaceVariant,
+                  color: active ? onActive : scheme.onSurfaceVariant,
                 ),
               ),
               const SizedBox(width: 6),
@@ -437,11 +444,8 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
                 positionChipLabel(_draft[c.id], grid: !isV5),
                 style: context.texts.labelSmall!.copyWith(
                   fontFeatures: const [FontFeature.tabularFigures()],
-                  color:
-                      (active
-                              ? scheme.onPrimaryContainer
-                              : scheme.onSurfaceVariant)
-                          .withValues(alpha: .7),
+                  color: (active ? onActive : scheme.onSurfaceVariant)
+                      .withValues(alpha: .7),
                 ),
               ),
             ],
@@ -564,7 +568,7 @@ class _PositionDialogState extends ConsumerState<_PositionDialog> {
             Text(
               _dragging
                   ? positionChipLabel(_draft[_selectedId])
-                  : '${params.width}×${params.height} · 点按或拖动放置角色',
+                  : context.l10n.positionHint(params.width, params.height),
               style: context.texts.labelSmall!.copyWith(
                 fontFeatures: const [FontFeature.tabularFigures()],
                 color: scheme.onSurfaceVariant,

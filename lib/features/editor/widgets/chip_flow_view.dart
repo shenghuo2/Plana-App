@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/editor_theme.dart';
 import '../chrome_scroll.dart';
 import '../editor_models.dart';
 import 'rich_tag_controller.dart';
 import '../../../core/util/haptics.dart';
+import '../../../l10n/l10n.dart';
 
 /// 尾部输入框的定宽(有词条时)。约五个汉字宽,够看清正在打的词,
 /// 又不至于自己独占一行把芯片流顶开。
@@ -167,6 +169,7 @@ class _ChipFlowViewState extends State<ChipFlowView>
     with TickerProviderStateMixin {
   final GlobalKey _stackKey = GlobalKey();
   final List<GlobalKey> _chipKeys = [];
+  final Map<int, GlobalKey> _bandKeys = {}; // 组首成员下标 → 组框
   List<(int, Offset)> _anchors = const []; // (gap, 加号中心) 内容坐标
 
   // FLIP 插入动画:每颗 chip 从旧槽位滑到新槽位(不闪跳)。
@@ -213,19 +216,27 @@ class _ChipFlowViewState extends State<ChipFlowView>
 
   Set<int> get _sel => widget.selection;
 
-  /// 权重面板弹出把视口压矮时,刚点的那颗别被盖住。见 [KeepInViewTracker]。
+  /// 权重面板 / 补全展开层把视口压矮时,刚点的那颗(或正在打字的输入框)
+  /// 别被盖住。见 [KeepInViewTracker]。
   final _keep = KeepInViewTracker();
-  int? _focusChip;
+  int? _focusChip; // null = 尾部输入框
+  final _inputKey = GlobalKey();
 
-  void _focusOn(int i) {
+  void _focusOn(int? i) {
     _focusChip = i;
     _keep.arm();
   }
 
-  void _revealFocusChip() {
+  void _revealFocus() {
     final i = _focusChip;
-    if (i == null || !_sel.contains(i) || i >= _chipKeys.length) return;
-    final b = _chipKeys[i].currentContext?.findRenderObject() as RenderBox?;
+    final GlobalKey key;
+    if (i == null) {
+      key = _inputKey;
+    } else {
+      if (!_sel.contains(i) || i >= _chipKeys.length) return;
+      key = _chipKeys[i];
+    }
+    final b = key.currentContext?.findRenderObject() as RenderBox?;
     if (b == null || !b.attached || !b.hasSize) return;
     b.showOnScreen(
       rect: const EdgeInsets.all(12).inflateRect(Offset.zero & b.size),
@@ -306,7 +317,7 @@ class _ChipFlowViewState extends State<ChipFlowView>
 
   /// 布局后按 chip 实际位置计算间隙加号锚点(浮层,不占 Wrap 位——
   /// 加号出现/消失时 chip 一动不动)。结果收敛才 setState,防循环。
-  void _scheduleAnchors(int count) {
+  void _scheduleAnchors(int count, List<UnitGroup> groups) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final sel = _sel;
@@ -326,10 +337,18 @@ class _ChipFlowViewState extends State<ChipFlowView>
         final tl = b.localToGlobal(Offset.zero, ancestor: stackBox);
         rects.add(tl & b.size);
       }
+      Rect? bandRect(UnitGroup b) {
+        final box =
+            _bandKeys[b.first]?.currentContext?.findRenderObject()
+                as RenderBox?;
+        if (box == null || !box.hasSize) return null;
+        return box.localToGlobal(Offset.zero, ancestor: stackBox) & box.size;
+      }
+
       final next = <(int, Offset)>[];
       for (var g = 0; g <= rects.length; g++) {
         if (!gaps.contains(g)) continue;
-        final Offset pos;
+        Offset pos;
         if (g == rects.length) {
           final r = rects.last;
           pos = Offset(r.right + 4, r.center.dy);
@@ -337,6 +356,30 @@ class _ChipFlowViewState extends State<ChipFlowView>
           final r = rects[g];
           pos = Offset(r.left - 4, r.center.dy);
         }
+        // 组框边上的 ⊕ 按落下后在框内还是框外摆
+        Offset? edge;
+        for (final b in groups) {
+          if (g == b.last + 1 &&
+              joinsGroupOnMove(b.first, b.last, sel, g, count)) {
+            final r = rects[b.last];
+            edge = Offset(r.right + 4, r.center.dy);
+          }
+        }
+        if (edge == null) {
+          for (final b in groups) {
+            final atFirst = g == b.first;
+            if (!atFirst && !(g == count && g == b.last + 1)) continue;
+            if (atFirst && joinsGroupOnMove(b.first, b.last, sel, g, count)) {
+              continue;
+            }
+            final band = bandRect(b);
+            if (band == null) continue;
+            edge = atFirst
+                ? Offset(band.left - 4, rects[g].center.dy)
+                : Offset(band.right + 4, rects[b.last].center.dy);
+          }
+        }
+        pos = edge ?? pos;
         next.add((g, Offset(pos.dx.clamp(12.0, double.maxFinite), pos.dy)));
       }
       if (!_sameAnchors(next)) setState(() => _anchors = next);
@@ -365,7 +408,8 @@ class _ChipFlowViewState extends State<ChipFlowView>
         while (_chipKeys.length < units.length) {
           _chipKeys.add(GlobalKey());
         }
-        _scheduleAnchors(units.length);
+        final groups = unitGroups(text, units);
+        _scheduleAnchors(units.length, groups);
         bool pendingOf(TopUnit u) =>
             widget.showTrans &&
             !u.isFold &&
@@ -381,7 +425,7 @@ class _ChipFlowViewState extends State<ChipFlowView>
           onTap: _tapBlank,
           child: NotificationListener<Notification>(
             onNotification: (n) {
-              if (_keep.update(n)) _revealFocusChip();
+              if (_keep.update(n)) _revealFocus();
               return false;
             },
             child: SingleChildScrollView(
@@ -403,7 +447,7 @@ class _ChipFlowViewState extends State<ChipFlowView>
                       runSpacing: 8,
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        ..._rows(text, units, sel, pendingOf, t),
+                        ..._rows(text, units, groups, sel, pendingOf, t),
                         _inputBox(units.isEmpty),
                       ],
                     ),
@@ -447,6 +491,7 @@ class _ChipFlowViewState extends State<ChipFlowView>
     const pad = EdgeInsets.symmetric(vertical: 7);
     final hintStyle = TextStyle(fontSize: fs, color: scheme.outline);
     return SizedBox(
+      key: _inputKey,
       width: empty ? double.infinity : _kInputWidth,
       child: Stack(
         children: [
@@ -459,7 +504,7 @@ class _ChipFlowViewState extends State<ChipFlowView>
                 ? Padding(
                     padding: pad,
                     child: Text(
-                      empty ? '输入标签,可输入中文自动翻译' : '继续添加…',
+                      empty ? context.l10n.chipInputHint : context.l10n.addMore,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: hintStyle,
@@ -470,7 +515,10 @@ class _ChipFlowViewState extends State<ChipFlowView>
           TextField(
             controller: widget.input,
             focusNode: widget.inputFocus,
-            onChanged: widget.onInputChanged,
+            onChanged: (v) {
+              _focusOn(null);
+              widget.onInputChanged(v);
+            },
             onSubmitted: (v) {
               widget.onInputSubmitted(chipInputBody(v));
               widget.inputFocus.requestFocus(); // 落一枚接着打下一枚
@@ -535,11 +583,11 @@ class _ChipFlowViewState extends State<ChipFlowView>
   List<Widget> _rows(
     String text,
     List<TopUnit> units,
+    List<UnitGroup> groups,
     Set<int> sel,
     bool Function(TopUnit u) pendingOf,
     double t,
   ) {
-    final groups = unitGroups(text, units);
     // own=false:这颗的选中态归外面那只框管,高亮和落位半透明都别再来一遍。
     Widget one(int i, double band, {bool own = true}) {
       final mine = own ? sel : const <int>{};
@@ -583,7 +631,12 @@ class _ChipFlowViewState extends State<ChipFlowView>
       );
       // 整只被拿起来时整只压暗 —— 和单颗芯片落位时一个待遇
       out.add(
-        widget.placing && whole ? Opacity(opacity: .45, child: band) : band,
+        KeyedSubtree(
+          key: _bandKeys.putIfAbsent(g.first, GlobalKey.new),
+          child: widget.placing && whole
+              ? Opacity(opacity: .45, child: band)
+              : band,
+        ),
       );
       i = g.last;
     }
@@ -855,19 +908,26 @@ class _TagChip extends StatelessWidget {
         ? pal.weightDown
         : null;
     // 权重底色/边框(web getWeightStyle 同款):越偏离 1 越深,禁用不铺色。
-    var chipBg = scheme.surfaceContainerHigh;
+    // 浮卡样式:芯片用卡片色(深色再提亮一档),禁用的沉到页面底色。
+    final float = context.skin.float;
+    final base = !float
+        ? scheme.surfaceContainerHigh
+        : Theme.of(context).brightness == Brightness.dark
+        ? Color.alphaBlend(
+            scheme.onSurface.withValues(alpha: .06),
+            scheme.surfaceContainerLow,
+          )
+        : scheme.surfaceContainerLow;
+    var chipBg = base;
     var chipBorder = scheme.outlineVariant;
     if (tok.disabled) {
       // 禁用要一眼看得出来。原先只是「正常 chip + 灰字 + 一道细划线」,
       // 底和边框和旁边的普通 chip 一模一样,扫过去根本分不出来(实测反馈)。
       // 改成往下沉一档的底 + 淡到几乎没有的边:整颗 chip 从这一片里退出去。
-      chipBg = scheme.surfaceContainerLowest;
+      chipBg = float ? scheme.surface : scheme.surfaceContainerLowest;
       chipBorder = scheme.outlineVariant.withValues(alpha: .4);
     } else if (sd && !tok.disabled) {
-      chipBg = Color.alphaBlend(
-        scheme.tertiary.withValues(alpha: .14),
-        scheme.surfaceContainerHigh,
-      );
+      chipBg = Color.alphaBlend(scheme.tertiary.withValues(alpha: .14), base);
       chipBorder = scheme.tertiary.withValues(alpha: .55);
     } else if (weightColor != null && !tok.disabled) {
       // 与正文色带同源:EditorPalette.weightWash 统一色相与强度曲线
@@ -875,10 +935,7 @@ class _TagChip extends StatelessWidget {
       final i = up
           ? ((mult - 1) / 1.5).clamp(0.0, 1.0)
           : ((1 - mult) / 0.7).clamp(0.0, 1.0);
-      chipBg = Color.alphaBlend(
-        pal.weightWash(mult)!,
-        scheme.surfaceContainerHigh,
-      );
+      chipBg = Color.alphaBlend(pal.weightWash(mult)!, base);
       chipBorder = (up ? pal.weightUpBorder : pal.weightDownBorder).withValues(
         alpha: .45 + i * .35,
       );

@@ -3,8 +3,9 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/store/app_stores.dart';
-import '../editor/editor_models.dart' show draftOf, outputOf;
-import '../inspiration/tag_models.dart' show TagEntry, tagCategoryDef;
+import '../editor/editor_models.dart' show draftOf, outputOf, pickEditorText;
+import '../inspiration/tag_models.dart'
+    show TagEntry, appendTagNegatives, tagCategoryDef;
 import '../vibe_library/naiv4vibe_codec.dart' show kModelToEncodingKey;
 import 'agent_chars.dart';
 import 'canvas_state.dart';
@@ -40,14 +41,14 @@ class GenerateNotifier extends Notifier<GenerateState> {
     return ws.initial ?? GenerateState.initial();
   }
 
-  /// 换上另一张画布的那组提示词;模型、参数、参考图等全局设置原样不动。
+  /// 换上另一张画布的那组内容;张数、循环档、面板开合等全局设置原样不动。
   void applyCanvas(CanvasPrompts prompts) {
     if (CanvasPrompts.of(state).sameAs(prompts)) return;
     state = prompts.applyTo(state);
   }
 
-  /// 把全局设置整份换回 [s],当前画布的词不动(撤销一次整体写入时用,
-  /// 词由 [CanvasWorkspaceNotifier.undoWrite] 另行还给原画布)。
+  /// 把全局设置整份换回 [s],当前画布的内容不动(撤销一次整体写入时用,
+  /// 画布内容由 [CanvasWorkspaceNotifier.undoWrite] 另行还给原画布)。
   void restoreGlobals(GenerateState s) =>
       state = CanvasPrompts.of(state).applyTo(s);
 
@@ -250,10 +251,18 @@ class GenerateNotifier extends Notifier<GenerateState> {
   }
 
   /// 灵感页「加入角色」/ 角色卡头「角色库」:带名追加(名字取自角色条目,
-  /// 头像取条目预览),尊重张数上限(按模型取,见 maxCharactersOf),超出静默
-  /// 截断(对齐 web availableSlots 语义)。返回实际加入条数。
+  /// 头像取条目预览,[source] 是条目 id),尊重张数上限(按模型取,见
+  /// maxCharactersOf),超出静默截断(对齐 web availableSlots 语义)。返回实际加入条数。
   int addNamedCharactersFrom(
-    List<({String name, String positive, String negative, String? avatar})>
+    List<
+      ({
+        String name,
+        String positive,
+        String negative,
+        String? avatar,
+        String? source,
+      })
+    >
     chars,
   ) {
     final cap = maxCharactersOf(state.params.model);
@@ -269,6 +278,7 @@ class GenerateNotifier extends Notifier<GenerateState> {
           negative: c.negative,
           position: _spawnPos(base),
           avatar: c.avatar,
+          source: c.source,
         ),
       );
       added++;
@@ -280,7 +290,7 @@ class GenerateNotifier extends Notifier<GenerateState> {
     return added;
   }
 
-  /// 角色卡点头像换人:名字、正负向、头像整份换成库条目的,站位和开关不动。
+  /// 角色卡点头像换人:名字、正负向、头像、来源整份换成库条目的,站位和开关不动。
   /// 编辑器草稿一并清空(空 = 与定稿无差别)—— 那份草稿对的是旧提示词。
   /// 条目没有预览图时头像也清掉,别让新名字挂着上一个人的脸。
   void fillCharacterFrom(
@@ -289,6 +299,7 @@ class GenerateNotifier extends Notifier<GenerateState> {
     required String positive,
     required String negative,
     String? avatar,
+    String? source,
   }) {
     state = state.copyWith(
       characters: [
@@ -301,6 +312,7 @@ class GenerateNotifier extends Notifier<GenerateState> {
               positiveRaw: '',
               negativeRaw: '',
               avatar: avatar,
+              source: source,
             )
           else
             c,
@@ -553,6 +565,17 @@ class GenerateNotifier extends Notifier<GenerateState> {
     return next.length;
   }
 
+  /// 应用 LoRA 堆:整组替换挂载列表,权重 / CLIP / 启停按堆里的来。
+  /// 下载中 / 下载失败的占位条留在前面;超出上限截断。
+  void applyLoraStack(List<ActiveLora> loras) {
+    final next = [
+      ...state.loras.where((l) => l.pending != null),
+      ...loras,
+    ].take(kMaxActiveLoras).toList();
+    state = state.copyWith(loras: next);
+    if (next.isNotEmpty) openPanel(Panel.lora);
+  }
+
   void updateLora(
     String name, {
     double? weight,
@@ -586,8 +609,8 @@ class GenerateNotifier extends Notifier<GenerateState> {
   /// 这两种情况下他手上的配置里都没有这一条,下载完再塞回去就是个幽灵改动:
   /// 明明点了移除,过几分钟它自己又回来了。装好的本体在库里,要用去挂载即可。
   ///
-  /// 下载途中切去了另一个底模的模型 / 画布,占位条就收在 [GenerateState.loraMem]
-  /// 里,在那儿转正,切回来时已经是装好的样子。
+  /// 占位条在哪张画布、挂着还是收在 [GenerateState.loraMem] 里都找得到,
+  /// 每一处都转正:下载途中切了画布或底模,切回来时已经是装好的样子。
   bool promotePendingLora(String placeholder, ActiveLora real) {
     List<ActiveLora>? promote(List<ActiveLora> list) {
       final idx = list.indexWhere((l) => l.name == placeholder);
@@ -630,22 +653,10 @@ class GenerateNotifier extends Notifier<GenerateState> {
     });
   }
 
-  /// 先在挂着的列表里改,找不到再去收起来的那几份([GenerateState.loraMem])里改。
+  /// 在每张画布挂着的和收起来的那几份([GenerateState.loraMem])里都改一遍。
   /// [change] 返回 null = 这份里没有要改的。
-  bool _updateLoraLists(List<ActiveLora>? Function(List<ActiveLora>) change) {
-    final active = change(state.loras);
-    if (active != null) {
-      state = state.copyWith(loras: active);
-      return true;
-    }
-    for (final e in state.loraMem.entries) {
-      final stashed = change(e.value);
-      if (stashed == null) continue;
-      state = state.copyWith(loraMem: {...state.loraMem, e.key: stashed});
-      return true;
-    }
-    return false;
-  }
+  bool _updateLoraLists(List<ActiveLora>? Function(List<ActiveLora>) change) =>
+      ref.read(canvasWorkspaceProvider.notifier).changeLoras(change);
 
   void removeLora(String name) {
     final victim = [
@@ -726,17 +737,12 @@ class GenerateNotifier extends Notifier<GenerateState> {
   /// 遮罩编辑器存盘:底图 + 遮罩 + 强度(+ 局部重绘的回贴信息)一起落进创作页
   /// 状态,发车交给主生成按钮。
   ///
-  /// 顺带把生成分辨率设成**发送尺寸** —— 局部重绘发的是裁切区、扩图发的是垫大
-  /// 之后的画布,两者都不是原图尺寸。不设的话下一次生成会按创作页那个旧尺寸发,
-  /// 服务端收到的图和声明的尺寸对不上。
+  /// 生成分辨率不动:重绘按遮罩自己的尺寸发([InpaintJob.sendSize],发送前由
+  /// stripHiddenModules 换进快照),主分辨率留给普通出图。
   ///
   /// 与 img2img 互斥:带遮罩的图生图就是重绘,留着另一份底图只会让发送层二选一。
-  void setInpaint(InpaintJob job, {required int width, required int height}) {
-    state = state.copyWith(
-      inpaint: job,
-      img2img: null,
-      params: state.params.copyWith(width: width, height: height),
-    );
+  void setInpaint(InpaintJob job) {
+    state = state.copyWith(inpaint: job, img2img: null);
     openPanel(Panel.i2i);
   }
 
@@ -744,14 +750,7 @@ class GenerateNotifier extends Notifier<GenerateState> {
   void updateInpaintStrength(double strength) {
     final cur = state.inpaint;
     if (cur == null) return;
-    state = state.copyWith(
-      inpaint: InpaintJob(
-        image: cur.image,
-        mask: cur.mask,
-        strength: strength,
-        paste: cur.paste,
-      ),
-    );
+    state = state.copyWith(inpaint: cur.copyWith(strength: strength));
   }
 
   void clearInpaint() => state = state.copyWith(inpaint: null);
@@ -812,39 +811,96 @@ class GenerateNotifier extends Notifier<GenerateState> {
   /// 改分区都从这份改起。
   List<PromptSection> get _rows => withMainRow(state.sections, state.prompt);
 
-  /// 整串换掉提示词(读图导入、反推)。分区里同一侧的词一并清掉、骨架留着 ——
-  /// 导进来的是一张图完整的那串,分区再拼上去就重复了。
+  /// 整串换掉提示词(读图导入、反推)。换了正向:分区整列清掉(同卡头清空);
+  /// 只换负面:各格负面清空,格子留着。
   void replacePrompts({String? positive, String? negative}) {
     setPrompts(positive: positive, negative: negative);
     if (state.sections.isEmpty) return;
-    final p = positive != null ? '' : null;
-    final n = negative != null ? '' : null;
+    if (positive != null) {
+      state = state.copyWith(sections: const []);
+      return;
+    }
+    if (negative == null) return;
     state = state.copyWith(
       sections: [
         for (final s in state.sections)
-          s.isMain
-              ? s
-              : s.copyWith(
-                  positive: p,
-                  positiveRaw: p,
-                  negative: n,
-                  negativeRaw: n,
-                ),
+          s.isMain ? s : s.copyWith(negative: '', negativeRaw: ''),
       ],
     );
   }
 
+  /// 读图导入、反推选「新建分区」:正负向成一格「分区 N」接在最后,原有的不动
+  /// (见 [importPromptsInto])。
+  void addPromptSection({String positive = '', String negative = ''}) {
+    state = importPromptsInto(
+      state,
+      positive,
+      negative,
+      SectionImport.newSection,
+      newId: _newId,
+      sectionName: nextSectionName(
+        state.sections.isEmpty ? const [PromptSection.main()] : _rows,
+      ),
+    );
+  }
+
+  /// 读图导入图里存的分区(见 [importSectionsInto])。
+  void importSections(
+    List<PromptSection> rows, {
+    String? mainNegative,
+    required bool append,
+  }) => state = importSectionsInto(
+    state,
+    rows,
+    mainNegative: mainNegative,
+    append: append,
+    newId: _newId,
+  );
+
+  /// AI 助手的提议写进来(见 [importPromptsInto])。
+  void importPrompts(String positive, String negative, SectionImport mode) =>
+      state = importPromptsInto(state, positive, negative, mode, newId: _newId);
+
+  /// 整列换回一份分区(AI 写回的撤销),id 原样。
+  void replaceSections(List<PromptSection> sections) =>
+      state = state.copyWith(sections: List.of(sections));
+
   // ---- 主提示词分区 ----
 
-  /// 灵感库条目各自成一格,不折叠(见 [withEntrySections])。格子名是分类名
-  /// (画风 / 角色 / 场景…),给了 [name] 就用它(法典词条叫「法典」)。
-  void addEntrySections(Iterable<TagEntry> entries, {String? name}) =>
-      state = state.copyWith(
-        sections: withEntrySections(_rows, state.prompt, [
-          for (final e in entries)
-            e.copyWith(name: name ?? tagCategoryDef(e.category).label),
-        ], newId: _newId),
-      );
+  /// 灵感库条目各自成一格,不折叠(见 [withEntrySections])。格子名是条目名,
+  /// 条目没名字时用 [fallback],没给就用分类名(画风 / 角色 / 场景…)。
+  ///
+  /// 正向已全在提示词里没另建格子的、同名同词的格子只是重新打开的,条目负面里
+  /// 整张卡还没有的词接到主体负面。
+  void addEntrySections(Iterable<TagEntry> entries, {String? fallback}) {
+    final named = [
+      for (final e in entries)
+        e.name.trim().isNotEmpty
+            ? e
+            : e.copyWith(name: fallback ?? tagCategoryDef(e.category).label),
+    ];
+    final sections = withEntrySections(
+      _rows,
+      state.prompt,
+      named,
+      newId: _newId,
+    );
+    final negDraft = pickEditorText(
+      state.negativePromptRaw,
+      state.negativePrompt,
+    ).trim();
+    final nextDraft = appendTagNegatives(
+      negDraft,
+      named,
+      present: joinSections(sections, state.negativePrompt, positive: false),
+    );
+    final neg = nextDraft == negDraft ? null : outputOf(nextDraft);
+    state = state.copyWith(
+      sections: sections,
+      negativePrompt: neg,
+      negativePromptRaw: neg == null ? null : draftOf(nextDraft, neg),
+    );
+  }
 
   /// 编辑器多选「提取为新分区」:这段草稿(权重、禁用、折叠照旧)成一格,
   /// 接在最后,返回新建的这一格(编辑器撤销时按它拿掉)。[positive] 为 false

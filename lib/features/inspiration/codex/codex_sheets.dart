@@ -9,24 +9,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/net/remote_image.dart';
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../editor/editor_models.dart' show draftOf, outputOf, pickEditorText;
 import '../../generate/generate_state.dart';
 import '../../generate/models.dart'
     show GenProvider, GenerateState, providerOfModel;
 import '../../generate/widgets/common.dart'
-    show confirmDialog, hintSnack, sharedAxisRoute;
+    show RoundIconBtn, confirmDialog, hintSnack, measureText, sharedAxisRoute;
 import '../../import/import_panel.dart' show ImportImagePanel;
 import '../../shell/shell_state.dart';
 import '../tag_models.dart'
     show TagCategory, TagEntry, appendTagPositivesFolded;
 import '../widgets/prompt_chips.dart';
+import 'codex_block.dart';
 import 'codex_card.dart';
 import 'codex_char_split.dart';
 import 'codex_favorites.dart';
 import 'codex_models.dart';
 import 'codex_providers.dart';
 import '../../../core/util/haptics.dart';
+import '../../../l10n/l10n.dart';
 
 /// 法典的三个弹层:词条详情、法典选择、来源致谢。
 
@@ -54,7 +57,7 @@ Future<T?> _sheet<T>(BuildContext context, Widget child) =>
 /// (含各角色段)折叠进主提示词。
 ///
 /// 主提示词分过区([asSection] 或已有分区)时,公共部分不折叠,自成一格
-/// (格子叫「法典」,见 GenerateNotifier.addEntrySections)。
+/// (格子名是词条标题,见 GenerateNotifier.addEntrySections)。
 ({int added, int dropped}) codexAddToPrompt(
   WidgetRef ref,
   CodexEntry e, {
@@ -106,7 +109,7 @@ Future<T?> _sheet<T>(BuildContext context, Widget child) =>
   return (added: added, dropped: chars.length - added);
 }
 
-/// 一段内容自成一格(不折叠),格子叫「法典」。空段跳过。
+/// 一段内容自成一格(不折叠),格子名是词条标题,没标题叫「法典」。空段跳过。
 void _codexSectionInto(WidgetRef ref, CodexEntry e, String content) {
   if (content.trim().isEmpty) return;
   ref.read(generateProvider.notifier).addEntrySections([
@@ -116,7 +119,7 @@ void _codexSectionInto(WidgetRef ref, CodexEntry e, String content) {
       name: e.title,
       positive: content,
     ),
-  ], name: '法典');
+  ], fallback: '法典');
 }
 
 /// 把一段内容作为**命名折叠组**追加进主提示词(复用灵感页同一条链路:草稿带回
@@ -617,25 +620,37 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
           // 说得清,那四个字省下的宽度正是带字两枚摆得开所需的 —— 「加入提示词」
           // 五个汉字加图标本来就顶格,谁多占一点它就换行,而这条操作栏一变高
           // 就把上面的内容挤走。
-          Row(
-            children: [
-              _favButton(scheme, e),
-              const SizedBox(width: 8),
-              _copyButton(e),
-              const SizedBox(width: 8),
-              // 2:3 差不多就是「导入」与「加入提示词」各自最小宽之比;
-              // 五五开等于把富余全给短的那枚,长的先换行
-              Expanded(flex: 2, child: _importButton()),
-              const SizedBox(width: 8),
-              Expanded(flex: 3, child: _addButton(e)),
-            ],
+          LayoutBuilder(
+            builder: (context, c) {
+              // 带字两枚都放得下「图标 + 文案」才带图标,否则两枚都只留文案
+              final room = c.maxWidth - 46 * 2 - 8 * 3;
+              final style = context.texts.labelLarge!;
+              final icons =
+                  measureText(context, context.l10n.importLabel, style) <=
+                      room * 2 / 5 - 42 &&
+                  measureText(context, context.l10n.addToPrompt, style) <=
+                      room * 3 / 5 - 42;
+              return Row(
+                children: [
+                  _favButton(scheme, e),
+                  const SizedBox(width: 8),
+                  _copyButton(e),
+                  const SizedBox(width: 8),
+                  // 2:3 差不多就是「导入」与「加入提示词」各自最小宽之比;
+                  // 五五开等于把富余全给短的那枚,长的先换行
+                  Expanded(flex: 2, child: _importButton(icons: icons)),
+                  const SizedBox(width: 8),
+                  Expanded(flex: 3, child: _addButton(e, icons: icons)),
+                ],
+              );
+            },
           ),
         ],
       ),
     );
   }
 
-  /// 带字那两枚共用的尺寸:描边和实心混排,高度圆角不统一一眼就看得出参差。
+  /// 带字那两枚共用的尺寸:浅底和实心混排,高度圆角不统一一眼就看得出参差。
   /// 内边距收到 8 —— M3 带图标的默认是左 16 右 24,那 32px 是压垮它的那根;
   /// 省下来的富余留给系统字号放大(放大到 1.2 倍才开始吃省略号)。
   static const _labeledStyle = ButtonStyle(
@@ -657,18 +672,25 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
     shape: WidgetStatePropertyAll(CircleBorder()),
   );
 
+  /// 非主动作的浅底配色(收藏 / 复制 / 导入 / 换一个),与「加入提示词」的实心
+  /// 主色分两级。
+  ButtonStyle _quietStyle(ColorScheme scheme) => FilledButton.styleFrom(
+    backgroundColor: scheme.surfaceContainerHighest,
+    foregroundColor: scheme.onSurfaceVariant,
+  );
+
   /// 复制。不留字(见 [_bottomActions]);纸叠图标够常见,长按还有 tooltip 兜底。
   Widget _copyButton(CodexEntry e) => Tooltip(
-    message: '复制提示词',
-    child: OutlinedButton(
+    message: context.l10n.copyPrompt,
+    child: FilledButton(
       onPressed: () async {
         await Clipboard.setData(ClipboardData(text: e.fullText));
         if (mounted) {
           Navigator.pop(context);
-          hintSnack(context, '已复制提示词', icon: Icons.copy);
+          hintSnack(context, context.l10n.promptCopied, icon: Icons.copy);
         }
       },
-      style: _iconOnlyStyle,
+      style: _iconOnlyStyle.merge(_quietStyle(context.scheme)),
       child: const Icon(Icons.copy, size: 20),
     ),
   );
@@ -677,21 +699,33 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
   ///
   /// 无图词条按**停用**摆着而不是撤掉 —— 一摞牌里翻过去少一枚按钮,
   /// 整条操作栏会跟着变形。下载期间也停用,同一张不让点两遍。
-  Widget _importButton() => OutlinedButton.icon(
-    onPressed: _imgCount > 0 && !_importing ? _importOriginal : null,
-    style: _labeledStyle,
-    icon: _importing
-        ? ValueListenableBuilder<double?>(
-            valueListenable: _importAt,
-            builder: (_, v, _) => SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2, value: v),
+  /// 不带图标时,下载中的转圈顶替文案。
+  Widget _importButton({required bool icons}) {
+    final progress = ValueListenableBuilder<double?>(
+      valueListenable: _importAt,
+      builder: (_, v, _) => SizedBox(
+        width: 18,
+        height: 18,
+        child: CircularProgressIndicator(strokeWidth: 2, value: v),
+      ),
+    );
+    return FilledButton.icon(
+      onPressed: _imgCount > 0 && !_importing ? _importOriginal : null,
+      style: _labeledStyle.merge(_quietStyle(context.scheme)),
+      icon: !icons
+          ? null
+          : _importing
+          ? progress
+          : const Icon(Icons.input, size: 18),
+      label: !icons && _importing
+          ? progress
+          : Text(
+              context.l10n.importLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
-          )
-        : const Icon(Icons.input, size: 18),
-    label: const Text('导入', maxLines: 1, overflow: TextOverflow.ellipsis),
-  );
+    );
+  }
 
   /// 下当前这张的原图 → 关弹层 → 推导入面板(与相册 / 画布同一个面板:
   /// 参数逐项挑着导,或整张用作图生图 / 风格 / 角色参考)。
@@ -722,7 +756,9 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
         },
       );
       if (!mounted) return;
-      final name = e.title.trim().isEmpty ? '法典原图' : e.title.trim();
+      final name = e.title.trim().isEmpty
+          ? l10nNow.codexOriginalImage
+          : e.title.trim();
       final nav = Navigator.of(context);
       nav.pop();
       unawaited(
@@ -739,7 +775,11 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
     } catch (_) {
       if (!mounted) return;
       setState(() => _importing = false);
-      hintSnack(context, '原图没下下来,检查下网络', icon: Icons.wifi_off_outlined);
+      hintSnack(
+        context,
+        context.l10n.originalNotDownloaded,
+        icon: Icons.wifi_off_outlined,
+      );
     }
   }
 
@@ -754,17 +794,17 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
 
   /// 随机模式的「换一个」:整宽独占一行 —— 随机页的主循环就是它,
   /// 挤进下面那行会和主行动抢眼。
-  Widget _rerollButton() => FilledButton.tonalIcon(
+  Widget _rerollButton() => FilledButton.icon(
     onPressed: _reroll,
     style: FilledButton.styleFrom(
       minimumSize: const Size(double.infinity, 46),
       shape: const StadiumBorder(),
-    ),
+    ).merge(_quietStyle(context.scheme)),
     icon: const Icon(Icons.casino_outlined, size: 18),
-    label: const Text('换一个'),
+    label: Text(context.l10n.shuffleAnother),
   );
 
-  Widget _addButton(CodexEntry e) => FilledButton.icon(
+  Widget _addButton(CodexEntry e, {required bool icons}) => FilledButton.icon(
     onPressed: () {
       final r = codexAddToPrompt(ref, e);
       Navigator.pop(context);
@@ -773,19 +813,25 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
         // 拆出了角色就说清楚 —— 不然用户只看到主提示词短了一截,
         // 不知道内容跑去了角色卡里
         r.dropped > 0
-            ? '已加入提示词 · ${r.added} 个角色(另 ${r.dropped} 个超出上限)'
-            : (r.added > 0 ? '已加入提示词 · ${r.added} 个角色' : '已加入提示词'),
+            ? context.l10n.addedToPromptCharsDropped(r.added, r.dropped)
+            : (r.added > 0
+                  ? context.l10n.addedToPromptChars(r.added)
+                  : context.l10n.addedToPrompt),
         icon: Icons.check_circle_outline,
-        actionLabel: '去创作',
+        actionLabel: context.l10n.goCreate,
         onAction: () =>
             ref.read(shellIndexProvider.notifier).select(kTabCreate),
       );
     },
     style: _labeledStyle,
-    icon: const Icon(Icons.add, size: 18),
+    icon: icons ? const Icon(Icons.add, size: 18) : null,
     // 兜底:系统字号调得很大时宁可省略号,也不能换行 —— 这条操作栏是钉在
     // 底部的,它一变高就把上面的内容挤走
-    label: const Text('加入提示词', maxLines: 1, overflow: TextOverflow.ellipsis),
+    label: Text(
+      context.l10n.addToPrompt,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    ),
   );
 
   /// 收藏开关。**图标自己就是反馈**,不弹 snack —— 翻词条时会连点很多下,
@@ -794,14 +840,14 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
     final on = ref
         .watch(codexFavKeysProvider)
         .contains(codexFavKey(widget.codex.id, e.id));
-    return OutlinedButton(
+    return FilledButton(
       onPressed: () => _toggleFav(e),
-      // 只有开关色是动的,尺寸走 [_iconOnlyStyle](54 收到 44:那 10px 给了
+      // 只有图标色是动的,尺寸走 [_iconOnlyStyle](54 收到 44:那 10px 给了
       // 「加入提示词」)
       style: _iconOnlyStyle.merge(
-        OutlinedButton.styleFrom(
+        FilledButton.styleFrom(
+          backgroundColor: scheme.surfaceContainerHighest,
           foregroundColor: on ? scheme.primary : scheme.onSurfaceVariant,
-          side: BorderSide(color: on ? scheme.primary : scheme.outlineVariant),
         ),
       ),
       child: Icon(
@@ -816,7 +862,7 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
     if (n.isFull && !n.contains(widget.codex.id, e.id)) {
       hintSnack(
         context,
-        '收藏已满(${CodexFavoritesNotifier.kMax} 条),先去收藏夹清一些',
+        context.l10n.favoritesFull(CodexFavoritesNotifier.kMax),
         icon: Icons.info_outline,
       );
       return;
@@ -845,7 +891,7 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
         ),
         const SizedBox(width: 4),
         Text(
-          '随机',
+          context.l10n.random,
           style: context.texts.labelSmall!.copyWith(
             color: scheme.onTertiaryContainer,
             fontWeight: FontWeight.w700,
@@ -1042,7 +1088,7 @@ class _CodexHeroImagesState extends ConsumerState<_CodexHeroImages>
                 ),
                 const SizedBox(width: 7),
                 Text(
-                  '点击翻转查看提示词',
+                  context.l10n.tapToFlip,
                   style: context.texts.labelLarge!.copyWith(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -1564,11 +1610,7 @@ class _BlurredBackdropState extends State<_BlurredBackdrop> {
 /// 对照表在这层 watch 而不是交给芯片自己:表到了芯片换字、宽度会变,
 /// 这层跟着重建才会重新量一遍。
 class _PromptFace extends ConsumerStatefulWidget {
-  const _PromptFace({
-    required this.codexId,
-    required this.entry,
-    this.bgUrl,
-  });
+  const _PromptFace({required this.codexId, required this.entry, this.bgUrl});
 
   final String codexId;
   final CodexEntry entry;
@@ -1647,9 +1689,9 @@ List<PromptSection> _codexPromptSections(CodexEntry e) {
     if (split.hasCharacters) {
       if (split.base.isNotEmpty) parts.add((label: null, body: split.base));
       for (final c in split.characters) {
-        parts.add((label: '角色 ${c.index}', body: c.positive));
+        parts.add((label: l10nNow.characterN(c.index), body: c.positive));
         if (c.negative.isNotEmpty) {
-          parts.add((label: '角色 ${c.index} · 负向', body: c.negative));
+          parts.add((label: l10nNow.charNNegative(c.index), body: c.negative));
         }
       }
     } else if (e.tags.trim().isNotEmpty) {
@@ -1688,7 +1730,7 @@ class _PickerSheet extends ConsumerWidget {
                 Icon(Icons.menu_book_outlined, size: 20, color: scheme.primary),
                 const SizedBox(width: 8),
                 Text(
-                  '选择法典',
+                  context.l10n.selectCodex,
                   style: context.texts.titleMedium!.copyWith(
                     fontWeight: FontWeight.w700,
                   ),
@@ -1712,8 +1754,11 @@ class _PickerSheet extends ConsumerWidget {
     bool sel,
   ) {
     final scheme = context.scheme;
+    final solid = sel && context.skin.float;
     return Material(
-      color: sel ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+      color: sel
+          ? context.solidFill(scheme.primaryContainer)
+          : scheme.surfaceContainerHigh,
       borderRadius: BorderRadius.circular(14),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -1737,33 +1782,49 @@ class _PickerSheet extends ConsumerWidget {
                             overflow: TextOverflow.ellipsis,
                             style: context.texts.bodyLarge!.copyWith(
                               fontWeight: FontWeight.w700,
+                              color: solid ? scheme.onPrimary : null,
                             ),
                           ),
                         ),
                         if (m.type.label.isNotEmpty) ...[
                           const SizedBox(width: 6),
-                          _tag(context, m.type.label, scheme.secondary),
+                          _tag(
+                            context,
+                            m.type.label,
+                            solid ? scheme.onPrimary : scheme.secondary,
+                          ),
                         ],
                         if (m.nsfw) ...[
                           const SizedBox(width: 4),
-                          _tag(context, 'R18', scheme.error),
+                          _tag(
+                            context,
+                            'R18',
+                            solid ? scheme.onPrimary : scheme.error,
+                          ),
                         ],
                       ],
                     ),
                     const SizedBox(height: 2),
                     Text(
                       '${m.author.isNotEmpty ? '${m.author} · ' : ''}'
-                      '${m.entryCount} 条',
+                      '${context.l10n.itemsN(m.entryCount)}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: context.texts.labelSmall!.copyWith(
-                        color: scheme.onSurfaceVariant,
+                        color: solid
+                            ? scheme.onPrimary.withValues(alpha: .8)
+                            : scheme.onSurfaceVariant,
                       ),
                     ),
                   ],
                 ),
               ),
-              if (sel) Icon(Icons.check, size: 18, color: scheme.primary),
+              if (sel)
+                Icon(
+                  Icons.check,
+                  size: 18,
+                  color: solid ? scheme.onPrimary : scheme.primary,
+                ),
             ],
           ),
         ),
@@ -1814,9 +1875,9 @@ class _FavoritesSheet extends ConsumerWidget {
   Future<void> _clear(BuildContext context, WidgetRef ref, int n) async {
     final ok = await confirmDialog(
       context,
-      title: '清空收藏',
-      message: '将移除全部 $n 条收藏,不可恢复。法典词条本身不受影响。',
-      confirmLabel: '清空',
+      title: context.l10n.clearFavorites,
+      message: context.l10n.clearFavoritesBody(n),
+      confirmLabel: context.l10n.clear,
     );
     if (!ok) return;
     await ref.read(codexFavoritesProvider.notifier).clearAll();
@@ -1843,7 +1904,7 @@ class _FavoritesSheet extends ConsumerWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      '收藏',
+                      context.l10n.favorites,
                       style: context.texts.titleMedium!.copyWith(
                         fontWeight: FontWeight.w800,
                       ),
@@ -1860,7 +1921,7 @@ class _FavoritesSheet extends ConsumerWidget {
                   if (favs.isNotEmpty)
                     TextButton(
                       onPressed: () => _clear(context, ref, favs.length),
-                      child: const Text('清空'),
+                      child: Text(context.l10n.clear),
                     )
                   else
                     const SizedBox(width: 12),
@@ -1938,14 +1999,14 @@ class _FavoritesSheet extends ConsumerWidget {
           ),
           const SizedBox(height: 10),
           Text(
-            '还没有收藏',
+            context.l10n.noFavoritesYet,
             style: context.texts.bodyMedium!.copyWith(
               color: scheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 4),
           Text(
-            '点开任意词条,左下角那颗星即可收藏',
+            context.l10n.favoriteHowTo,
             textAlign: TextAlign.center,
             style: context.texts.labelSmall!.copyWith(color: scheme.outline),
           ),
@@ -1984,30 +2045,40 @@ class _UnfavDot extends StatelessWidget {
 
 Future<List<String>?> showCodexCategorySheet(
   BuildContext context,
+  String codexId,
   List<CodexNode> tree,
   List<String> current,
-  int total,
+  List<CodexEntry> entries,
 ) => _sheet<List<String>>(
   context,
-  _CategorySheet(tree: tree, current: current, total: total),
+  _CategorySheet(
+    codexId: codexId,
+    tree: tree,
+    current: current,
+    entries: entries,
+  ),
 );
 
-class _CategorySheet extends StatefulWidget {
+class _CategorySheet extends ConsumerStatefulWidget {
   const _CategorySheet({
+    required this.codexId,
     required this.tree,
     required this.current,
-    required this.total,
+    required this.entries,
   });
 
+  final String codexId;
   final List<CodexNode> tree;
   final List<String> current;
-  final int total;
+
+  /// 整部法典的词条:屏蔽后各分类剩多少条从这里数。
+  final List<CodexEntry> entries;
 
   @override
-  State<_CategorySheet> createState() => _CategorySheetState();
+  ConsumerState<_CategorySheet> createState() => _CategorySheetState();
 }
 
-class _CategorySheetState extends State<_CategorySheet> {
+class _CategorySheetState extends ConsumerState<_CategorySheet> {
   /// 浏览游标(已下钻到的路径,非选中项)。打开时定位到当前选中项的父层,
   /// 好直接在同层改选。
   late List<String> _cursor = widget.current.length > 1
@@ -2016,6 +2087,30 @@ class _CategorySheetState extends State<_CategorySheet> {
 
   /// 层级切换方向:下钻=true(新层从右侧滑入)、返回=false(从左侧滑入)。
   bool _forward = true;
+
+  /// 各分类被屏蔽掉的条数,键见 [_pathKey](空串 = 整部)。屏蔽状态变了才重数。
+  CodexBlock? _countedFor;
+  Map<String, int> _hidden = const {};
+
+  static String _pathKey(List<String> path) => path.join('\u0000');
+
+  Map<String, int> _hiddenCounts(CodexBlock b) {
+    if (identical(b, _countedFor)) return _hidden;
+    _countedFor = b;
+    final m = <String, int>{};
+    if (b.active) {
+      for (final e in widget.entries) {
+        if (!b.hides(e.path)) continue;
+        var k = '';
+        m[k] = (m[k] ?? 0) + 1;
+        for (final p in e.path) {
+          k = k.isEmpty ? p : '$k\u0000$p';
+          m[k] = (m[k] ?? 0) + 1;
+        }
+      }
+    }
+    return _hidden = m;
+  }
 
   /// 按名字在树里逐级下钻到某路径的节点(找不到返回 null)。
   CodexNode? _nodeAt(List<String> path) {
@@ -2049,6 +2144,8 @@ class _CategorySheetState extends State<_CategorySheet> {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
+    final block = ref.watch(codexBlockProvider(widget.codexId));
+    final hidden = _hiddenCounts(block);
     // 定高弹层:各父类的二级分类数量不同,自适应高度会让弹层「一会高一会低」;
     // 定高后切分支只在内部滚动,弹层本身不再跳,层级切换用滑动+淡入表现进/退。
     final h = MediaQuery.sizeOf(context).height * 0.6;
@@ -2057,7 +2154,7 @@ class _CategorySheetState extends State<_CategorySheet> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _breadcrumb(scheme),
+          _breadcrumb(scheme, block),
           Expanded(
             // 层级切换走 Material 共享轴(横向):下钻新层从右侧滑入、旧层向左退出;
             // 返回(reverse)反向。与 app 内页面转场同一套动效语言。
@@ -2074,7 +2171,7 @@ class _CategorySheetState extends State<_CategorySheet> {
                   ),
               child: KeyedSubtree(
                 key: ValueKey('${_cursor.length}/${_cursor.join('/')}'),
-                child: _levelList(scheme),
+                child: _levelList(scheme, block, hidden),
               ),
             ),
           ),
@@ -2084,11 +2181,19 @@ class _CategorySheetState extends State<_CategorySheet> {
   }
 
   /// 当前层:整层选择(全部)+ 各子分类。定高内部滚动,不撑动弹层。
-  Widget _levelList(ColorScheme scheme) {
+  /// 已屏蔽的分类压暗、点不动,条数照写它原有多少条。
+  Widget _levelList(
+    ColorScheme scheme,
+    CodexBlock block,
+    Map<String, int> hidden,
+  ) {
     final atRoot = _cursor.isEmpty;
+    int left(List<String> path, int count) =>
+        count - (hidden[_pathKey(path)] ?? 0);
     final branchCount = atRoot
-        ? widget.total
-        : (_nodeAt(_cursor)?.count ?? widget.total);
+        ? widget.entries.length
+        : (_nodeAt(_cursor)?.count ?? widget.entries.length);
+    final anyDrill = _level.any((n) => n.children.isNotEmpty);
     return ListView(
       // primary:false —— 过场时新旧两个 ListView 并存,别去抢同一个滚动位置
       primary: false,
@@ -2099,37 +2204,120 @@ class _CategorySheetState extends State<_CategorySheet> {
         // 下钻后的「全部「X」」只有确实是当前筛选路径时才高亮。
         _tile(
           scheme,
-          label: atRoot ? '全部' : '全部「${_cursor.last}」',
-          count: branchCount,
+          label: atRoot ? context.l10n.all : context.l10n.allIn(_cursor.last),
+          count: left(_cursor, branchCount),
           selected: atRoot ? false : _isCurrent(_cursor),
           leadingAll: true,
           onTap: () => Navigator.pop(context, atRoot ? <String>[] : _cursor),
         ),
         const SizedBox(height: 8),
         for (final n in _level) ...[
-          _tile(
-            scheme,
-            label: n.name,
-            count: n.count,
-            selected: _isCurrent([..._cursor, n.name]),
-            // 有子级 → 点进去(下钻);叶子 → 直接选中
-            drillable: n.children.isNotEmpty,
-            onTap: n.children.isNotEmpty
-                ? () => setState(() {
-                    _forward = true;
-                    _cursor = [..._cursor, n.name];
-                  })
-                : () => Navigator.pop(context, [..._cursor, n.name]),
-          ),
+          _nodeTile(scheme, n, block, left, chevronSlot: anyDrill),
           const SizedBox(height: 8),
         ],
       ],
     );
   }
 
+  Widget _nodeTile(
+    ColorScheme scheme,
+    CodexNode n,
+    CodexBlock block,
+    int Function(List<String> path, int count) left, {
+    required bool chevronSlot,
+  }) {
+    final path = [..._cursor, n.name];
+    final off = block.hides(path);
+    final selected = !off && _isCurrent(path);
+    return _tile(
+      scheme,
+      label: n.name,
+      count: off ? n.count : left(path, n.count),
+      selected: selected,
+      dimmed: off,
+      // 有子级 → 点进去(下钻);叶子 → 直接选中
+      drillable: n.children.isNotEmpty,
+      onTap: off
+          ? null
+          : n.children.isNotEmpty
+          ? () => setState(() {
+              _forward = true;
+              _cursor = path;
+            })
+          : () => Navigator.pop(context, path),
+      chevronSlot: chevronSlot,
+      trailing: _blockButton(
+        scheme,
+        block,
+        path,
+        onSolid: selected && context.skin.float,
+      ),
+    );
+  }
+
+  /// 分类卡右侧的屏蔽钮:睁眼 = 显示,闭眼 = 已屏蔽。
+  /// [onSolid]:压在实心主色的选中卡上。
+  Widget _blockButton(
+    ColorScheme scheme,
+    CodexBlock block,
+    List<String> path, {
+    bool onSolid = false,
+  }) {
+    final on = block.contains(path);
+    return RoundIconBtn(
+      on ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+      size: MediaQuery.sizeOf(context).width < 350 ? 32 : 36,
+      color: onSolid
+          ? scheme.onPrimary
+          : (on ? scheme.primary : scheme.onSurfaceVariant),
+      background: onSolid
+          ? scheme.onPrimary.withValues(alpha: .18)
+          : scheme.surfaceContainerHighest,
+      tooltip: on ? context.l10n.unblock : context.l10n.block,
+      onTap: () {
+        Haptics.selection();
+        ref.read(codexBlocksProvider.notifier).toggle(widget.codexId, path);
+      },
+    );
+  }
+
+  /// 根层右上角「全部解除」:有屏蔽项才出现,点一下清空。
+  Widget _unblockAll(ColorScheme scheme) => Material(
+    color: scheme.surfaceContainerHigh,
+    borderRadius: BorderRadius.circular(20),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: () {
+        Haptics.selection();
+        ref.read(codexBlocksProvider.notifier).clear(widget.codexId);
+      },
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.visibility_outlined,
+              size: 15,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              context.l10n.unblockAll,
+              style: context.texts.labelMedium!.copyWith(
+                fontWeight: FontWeight.w600,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
   /// 面包屑:返回 + 可点的层级路径(点任一级跳回该层)。定高 + 定宽返回位,
   /// 让根/非根切换时文字起点与整条高度都不抖。
-  Widget _breadcrumb(ColorScheme scheme) {
+  Widget _breadcrumb(ColorScheme scheme, CodexBlock block) {
     final atRoot = _cursor.isEmpty;
     Widget seg(String label, VoidCallback? onTap) => InkWell(
       borderRadius: BorderRadius.circular(8),
@@ -2149,7 +2337,7 @@ class _CategorySheetState extends State<_CategorySheet> {
     return SizedBox(
       height: 48,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(6, 4, 12, 4),
+        padding: const EdgeInsets.fromLTRB(6, 4, 14, 4),
         child: Row(
           children: [
             // 根层不占返回位,「分类」直接靠左;下钻后才出现返回键
@@ -2161,7 +2349,7 @@ class _CategorySheetState extends State<_CategorySheet> {
                   height: 36,
                 ),
                 padding: EdgeInsets.zero,
-                tooltip: '上一级',
+                tooltip: context.l10n.upLevel,
                 icon: const Icon(Icons.arrow_back, size: 20),
                 onPressed: () => setState(() {
                   _forward = false;
@@ -2174,7 +2362,7 @@ class _CategorySheetState extends State<_CategorySheet> {
                 child: Row(
                   children: [
                     seg(
-                      '分类',
+                      context.l10n.categories,
                       atRoot
                           ? null
                           : () => setState(() {
@@ -2202,6 +2390,7 @@ class _CategorySheetState extends State<_CategorySheet> {
                 ),
               ),
             ),
+            if (atRoot && block.active) _unblockAll(scheme),
           ],
         ),
       ),
@@ -2209,25 +2398,38 @@ class _CategorySheetState extends State<_CategorySheet> {
   }
 
   /// 一张分类卡:填充底 + 圆角 + 大点击区(靠外部 8px 间距分隔,不再贴边)。
+  /// 名称后紧跟条数;右侧 [trailing](屏蔽钮)再右箭头。带 [trailing] 时收窄
+  /// 上下内边距,卡高与不带的一致。[chevronSlot]:同层有可下钻的,叶子也留出
+  /// 箭头位,一列屏蔽钮对齐。
   Widget _tile(
     ColorScheme scheme, {
     required String label,
     required int count,
     required bool selected,
-    required VoidCallback onTap,
+    required VoidCallback? onTap,
     bool drillable = false,
     bool leadingAll = false,
+    bool dimmed = false,
+    bool chevronSlot = false,
+    Widget? trailing,
   }) {
-    final fg = selected ? scheme.onPrimaryContainer : scheme.onSurface;
-    final sub = selected ? scheme.onPrimaryContainer : scheme.onSurfaceVariant;
+    final onSel = context.onSolidFill(scheme.onPrimaryContainer);
+    final fg = selected ? onSel : (dimmed ? scheme.outline : scheme.onSurface);
+    final sub = selected
+        ? onSel
+        : (dimmed ? scheme.outline : scheme.onSurfaceVariant);
     return Material(
-      color: selected ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+      color: selected
+          ? context.solidFill(scheme.primaryContainer)
+          : scheme.surfaceContainerHigh,
       borderRadius: BorderRadius.circular(14),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 14, 14),
+          padding: trailing == null
+              ? const EdgeInsets.fromLTRB(16, 14, 14, 14)
+              : const EdgeInsets.fromLTRB(16, 8, 10, 8),
           child: Row(
             children: [
               if (leadingAll) ...[
@@ -2235,33 +2437,43 @@ class _CategorySheetState extends State<_CategorySheet> {
                 Icon(
                   Icons.apps,
                   size: 18,
-                  color: selected ? scheme.onPrimaryContainer : scheme.primary,
+                  color: selected ? onSel : scheme.primary,
                 ),
                 const SizedBox(width: 10),
               ],
               Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.texts.bodyLarge!.copyWith(
-                    fontWeight: FontWeight.w600,
-                    color: fg,
-                  ),
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.texts.bodyLarge!.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: fg,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '$count',
+                      style: context.texts.labelMedium!.copyWith(
+                        color: sub,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 10),
-              Text(
-                '$count',
-                style: context.texts.labelMedium!.copyWith(
-                  color: sub,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              if (drillable) ...[
-                const SizedBox(width: 4),
-                Icon(Icons.chevron_right, size: 20, color: sub),
-              ],
+              if (trailing != null) ...[const SizedBox(width: 8), trailing],
+              if (drillable)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Icon(Icons.chevron_right, size: 20, color: sub),
+                )
+              else if (chevronSlot)
+                const SizedBox(width: 24),
             ],
           ),
         ),
@@ -2305,13 +2517,16 @@ class _AboutSheet extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            if (m.source.isNotEmpty) _line(context, '来源', m.source),
-            if (m.author.isNotEmpty) _line(context, '作者', m.author),
-            if (m.version.isNotEmpty) _line(context, '版本', m.version),
+            if (m.source.isNotEmpty)
+              _line(context, context.l10n.source, m.source),
+            if (m.author.isNotEmpty)
+              _line(context, context.l10n.author, m.author),
+            if (m.version.isNotEmpty)
+              _line(context, context.l10n.version, m.version),
             if (m.contributors.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(
-                '贡献者',
+                context.l10n.contributors,
                 style: context.texts.labelMedium!.copyWith(
                   color: scheme.onSurfaceVariant,
                 ),
@@ -2328,7 +2543,7 @@ class _AboutSheet extends StatelessWidget {
             ],
             const SizedBox(height: 14),
             Text(
-              '内容与例图版权归各法典作者所有,本页仅作可视化索引。',
+              context.l10n.codexCopyright,
               style: context.texts.labelSmall!.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
@@ -2336,7 +2551,10 @@ class _AboutSheet extends StatelessWidget {
             const SizedBox(height: 10),
             for (final l in [
               ...m.links,
-              (label: '法典图鉴 · 原站', url: 'https://novelai.quicktagcloud.com'),
+              (
+                label: context.l10n.codexSiteLink,
+                url: 'https://novelai.quicktagcloud.com',
+              ),
             ])
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),

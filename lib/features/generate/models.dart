@@ -3,6 +3,7 @@ library;
 
 import 'dart:typed_data';
 
+import '../../core/util/webp_to_png.dart' show webpSizeOf;
 import 'res_rules.dart' show kFreePixelThreshold;
 
 const Object _unset = Object();
@@ -31,6 +32,7 @@ class CharacterPrompt {
     this.position, // 'A1'..'E5';null = AUTO
     this.activeTab = CharTab.positive,
     this.avatar,
+    this.source,
   });
 
   final String id;
@@ -41,6 +43,9 @@ class CharacterPrompt {
   /// 头像:从灵感角色库选来时带上的预览图(http URL 或本机文件路径)。
   /// 只在角色卡上显示,不进载荷;null = 没有(手写 / AI 写的 / 导入的角色)。
   final String? avatar;
+
+  /// 从灵感角色库选来时的条目 id,不进载荷;图库按角色归类认它。
+  final String? source;
 
   /// 编辑器原文草稿(含禁用 `~tag~` / 折叠 `<#名字: …>` 等仅编辑期语法),
   /// 空 = 与定稿无差别,不必单独存。有效性由读取侧判定,见 [pickEditorText]。
@@ -61,6 +66,7 @@ class CharacterPrompt {
     Object? position = _unset,
     CharTab? activeTab,
     Object? avatar = _unset,
+    Object? source = _unset,
   }) {
     return CharacterPrompt(
       id: id,
@@ -73,6 +79,7 @@ class CharacterPrompt {
       position: position == _unset ? this.position : position as String?,
       activeTab: activeTab ?? this.activeTab,
       avatar: avatar == _unset ? this.avatar : avatar as String?,
+      source: source == _unset ? this.source : source as String?,
     );
   }
 }
@@ -95,6 +102,7 @@ class PromptSection {
     this.negativeRaw = '',
     this.enabled = true,
     this.artist = false,
+    this.sources = const [],
   });
 
   /// 主体那一行(见 [kMainSectionId])。
@@ -104,7 +112,8 @@ class PromptSection {
       negative = '',
       positiveRaw = '',
       negativeRaw = '',
-      artist = false;
+      artist = false,
+      sources = const [];
 
   final String id;
   final String name;
@@ -121,6 +130,9 @@ class PromptSection {
   /// 「画风」而不是「分区 N」。
   final bool artist;
 
+  /// 这一格来自的灵感库条目 id(合并过的格子有几个);图库按角色 / 画风归类认它。
+  final List<String> sources;
+
   bool get isMain => id == kMainSectionId;
 
   PromptSection copyWith({
@@ -130,6 +142,7 @@ class PromptSection {
     String? positiveRaw,
     String? negativeRaw,
     bool? enabled,
+    List<String>? sources,
   }) => PromptSection(
     id: id,
     name: name ?? this.name,
@@ -139,6 +152,7 @@ class PromptSection {
     negativeRaw: negativeRaw ?? this.negativeRaw,
     enabled: enabled ?? this.enabled,
     artist: artist,
+    sources: sources ?? this.sources,
   );
 }
 
@@ -192,14 +206,13 @@ class VibeItem {
       );
 }
 
-/// 角色参考迁移模式。label 显示用;api 直接进载荷 base_caption(对齐 web)。
+/// 角色参考迁移模式。api 直接进载荷 base_caption(对齐 web)。
 enum CharRefMode {
-  character('角色', 'character'),
-  style('风格', 'style'),
-  both('角色&风格', 'character&style');
+  character('character'),
+  style('style'),
+  both('character&style');
 
-  const CharRefMode(this.label, this.api);
-  final String label;
+  const CharRefMode(this.api);
   final String api;
 }
 
@@ -264,7 +277,7 @@ class InpaintJob {
 
   final double strength;
 
-  /// 局部重绘的贴回信息;null = 整图(结果直接入库)。
+  /// 局部重绘的贴回信息;null = 整图 / 扩图(成图混回 [image])。
   final InpaintPaste? paste;
 
   /// 底图在图库里的 id;回编辑器时用它认「是不是同一张图」。
@@ -280,11 +293,20 @@ class InpaintJob {
 
   /// 发送尺寸(宽, 高):遮罩与底图同尺寸,读遮罩的 PNG 头即得。重绘只能按这个
   /// 尺寸发 —— 声明的宽高和图对不上,服务端拒单,贴回也对不上框。读不出 null。
-  (int, int)? get sendSize => _pngSizeOf(mask);
+  (int, int)? get sendSize => pngSizeOf(mask);
+
+  InpaintJob copyWith({double? strength}) => InpaintJob(
+    image: image,
+    mask: mask,
+    strength: strength ?? this.strength,
+    paste: paste,
+    sourceId: sourceId,
+    grid: grid,
+  );
 }
 
 /// 只读 PNG 头拿宽高(IHDR 在 offset 16 / 20),不解码整图;不是 PNG 给 null。
-(int, int)? _pngSizeOf(Uint8List b) {
+(int, int)? pngSizeOf(Uint8List b) {
   const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
   if (b.length < 24) return null;
   for (var i = 0; i < sig.length; i++) {
@@ -295,7 +317,10 @@ class InpaintJob {
   return w > 0 && h > 0 ? (w, h) : null;
 }
 
-/// 局部重绘贴回:结果(发送框尺寸)中 tight 区域贴回原图对应位置。
+/// 成图宽高(PNG / WebP 都只读文件头);两种都不是给 null。
+(int, int)? imageSizeOf(Uint8List b) => pngSizeOf(b) ?? webpSizeOf(b);
+
+/// 局部重绘贴回:成图(发送尺寸)缩回 [region] 大小,按羽化遮罩混回原图。
 class InpaintPaste {
   const InpaintPaste({
     required this.original,
@@ -312,14 +337,19 @@ class InpaintPaste {
   /// 原完整图 PNG(贴回底)。
   final Uint8List original;
 
-  /// 发送框原点(相对原图;发送框尺寸即快照 params.width/height)。
+  /// 发送那块在原图里的左上角(同 [tightX] / [tightY])。
   final int sendX, sendY;
 
-  /// 贴回的紧凑区域(相对原图)。
+  /// 发送那块在原图里的位置与大小,见 [region]。
   final int tightX, tightY, tightW, tightH;
 
   /// 入库尺寸(=原图尺寸)。
   final int outW, outH;
+
+  /// 发送那块在原图里的位置与大小。局部框会放大到约 100 万像素再发,
+  /// 这里是放大前的;实际发送尺寸是快照的 params.width / height。
+  ({int x, int y, int w, int h}) get region =>
+      (x: tightX, y: tightY, w: tightW, h: tightH);
 }
 
 class Img2ImgConfig {
@@ -426,6 +456,20 @@ const nai5Models = <String>[
 ];
 
 bool isNai5Model(String displayModel) => displayModel.startsWith('NAI 5.0');
+
+/// 界面上显示的模型名:NAI 去掉版本号的「.0」(`NAI 5.0 Full Medium` →
+/// `NAI 5 Full Medium`)。只管显示,存档与判定仍用全名。
+String modelName(String model) {
+  final parts = model.split(' ');
+  if (parts.length < 2 || parts.first != 'NAI') return model;
+  parts[1] = parts[1].replaceFirst(RegExp(r'\.0$'), '');
+  return parts.join(' ');
+}
+
+/// 顶栏模型入口的短名:再把 Medium 缩成 M(`NAI 5.0 Full Medium` →
+/// `NAI 5 Full M`),Full / Curated 不缩。
+String shortModelName(String model) =>
+    modelName(model).replaceFirst(RegExp(r' Medium$'), ' M');
 
 /// V5 Full 的 Medium 档:步数、采样器按官方固定,不发 CFG Rescale。
 bool isNai5MediumModel(String displayModel) =>
@@ -554,14 +598,9 @@ String animaTierOf(String displayModel) => switch (displayModel) {
 /// 去掉了 Anima Turbo 的「(默认)」:那在 web 指「anima 档位里的默认」,
 /// 而本 app 默认模型是 NAI 4.5 Full,七档平铺一张表会被读成"app 的默认"。
 /// 分隔符统一用 ` · `(web 的 NAI 用逗号、anima 用点,混着来一页两套版式)。
+///
+/// NAI 各档的文案在 ARB 里(descNai*),这张表只剩 Anima / Krea。
 const modelDescriptions = <String, String>{
-  'NAI 5.0 Full': '最新旗舰模型 · 1471 token · NSFW',
-  'NAI 5.0 Full Medium': '最新旗舰 Medium 档 · 节约 40% 额度 · NSFW',
-  'NAI 5.0 Curated': '最新精选版 · 703 token · SFW',
-  'NAI 4.5 Full': 'V4.5 旧模型 · NSFW',
-  'NAI 4.5 Curated': 'V4.5 旧模型精选版 · SFW',
-  'NAI 4.0 Full': 'V4 旧模型 · NSFW',
-  'NAI 4.0 Curated': 'V4 旧模型精选版 · SFW',
   'Anima Turbo': '蒸馏版 · 12 步 · 快,适合初稿',
   'Anima Aesthetic': '画风美学微调 · 36 步 · 适合试风格',
   'Anima Base': '标准基础模型 · 36 步',
@@ -1194,18 +1233,7 @@ class GenParams {
 }
 
 /// 折叠面板标识
-enum Panel {
-  prompt,
-  characters,
-  vibe,
-  charRef,
-  i2i,
-  lora,
-  hires,
-  animaNl,
-  kreaStyleRef,
-  kreaPrompt,
-}
+enum Panel { prompt, characters, vibe, charRef, i2i, lora, hires, kreaStyleRef }
 
 /// 没选过预设时用的那一档:新用户的第一张画布、存档里没记的,同 web 默认档。
 const kDefaultPromptPresetId = 'heavy';
@@ -1217,6 +1245,8 @@ class GenerateState {
     this.promptRaw = '',
     this.negativePromptRaw = '',
     this.sections = const [],
+    this.composedSections = const [],
+    this.usedEntries = const [],
     required this.characters,
     required this.vibes,
     required this.charRefs,
@@ -1263,6 +1293,14 @@ class GenerateState {
   /// 只活在创作页:生成快照里已拼进 [prompt](见 composeSections)。
   final List<PromptSection> sections;
 
+  /// 生成快照里拼进 [prompt] 的那几格(只留进了载荷的,主体的词也写在行里,
+  /// 见 composeSections)。不发给 NAI、不落盘,入库时写进 PNG(见 section_layout.dart)。
+  final List<PromptSection> composedSections;
+
+  /// 生成快照里拼进 [prompt] 的那几格来自的灵感库条目 id(见 composeSections)。
+  /// 不发给 NAI;图库按角色 / 画风归类认它。
+  final List<String> usedEntries;
+
   final List<CharacterPrompt> characters;
   final List<VibeItem> vibes;
   final List<CharRefItem> charRefs;
@@ -1271,13 +1309,13 @@ class GenerateState {
   final int anlas;
   final Set<Panel> openPanels;
 
-  /// 挂载的 LoRA(anima / krea 共用一份;NAI 模型生成时由模块剥离层清掉)。
+  /// 挂载的 LoRA(anima / krea 共用一份列表;NAI 模型生成时由模块剥离层清掉)。
   /// 两边的库互不通用,换底模时收进 [loraMem]、换上另一边上次挂的
   /// (见 [withLoraBaseOf])。
   final List<ActiveLora> loras;
 
-  /// 不在用的那个底模上次挂的 LoRA(`anima` / `krea` → 列表)。模型跟画布走之后,
-  /// 在 Anima 画布和 Krea 画布之间来回切,各自挂的不能被清掉。
+  /// 不在用的那个底模上次挂的 LoRA(`anima` / `krea` → 列表)。同一张画布
+  /// 进出 Krea 来回切,挂过的不能被清掉。
   final Map<String, List<ActiveLora>> loraMem;
 
   /// Krea 风格参考图(krea 专属;其它父类生成时由剥离层清掉)。
@@ -1328,6 +1366,8 @@ class GenerateState {
     String? promptRaw,
     String? negativePromptRaw,
     List<PromptSection>? sections,
+    List<PromptSection>? composedSections,
+    List<String>? usedEntries,
     List<CharacterPrompt>? characters,
     List<VibeItem>? vibes,
     List<CharRefItem>? charRefs,
@@ -1348,6 +1388,8 @@ class GenerateState {
       promptRaw: promptRaw ?? this.promptRaw,
       negativePromptRaw: negativePromptRaw ?? this.negativePromptRaw,
       sections: sections ?? this.sections,
+      composedSections: composedSections ?? this.composedSections,
+      usedEntries: usedEntries ?? this.usedEntries,
       characters: characters ?? this.characters,
       vibes: vibes ?? this.vibes,
       charRefs: charRefs ?? this.charRefs,

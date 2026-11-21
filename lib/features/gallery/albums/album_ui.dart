@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +11,7 @@ import '../gallery_state.dart';
 import '../widgets/stack_card.dart';
 import 'album_models.dart';
 import 'album_state.dart';
+import '../../../l10n/l10n.dart';
 
 void albumError(BuildContext context, Object error) => hintSnack(
   context,
@@ -16,12 +19,45 @@ void albumError(BuildContext context, Object error) => hintSnack(
   icon: Icons.error_outline,
 );
 
+/// 收藏、回收站的固定封面图标;其余相册取图做封面,返回 null。
+IconData? albumCoverIcon(String? id) => switch (id) {
+  favoritesId => Icons.favorite_border,
+  trashId => Icons.delete_outline,
+  _ => null,
+};
+
+/// 收藏 / 取消收藏这一张。取消时给撤销:在「收藏」里看着的话,图会随即离开。
+Future<void> toggleFavorite(BuildContext context, String imageId) async {
+  final container = ProviderScope.containerOf(context, listen: false);
+  final albums = container.read(albumsProvider.notifier);
+  final on = !container.read(albumsProvider).isFavorite(imageId);
+  try {
+    await albums.setFavorite(imageId, on);
+  } catch (e) {
+    if (context.mounted) albumError(context, e);
+    return;
+  }
+  if (!context.mounted) return;
+  hintSnack(
+    context,
+    on ? context.l10n.favorited : context.l10n.unfavoritedSnack,
+    icon: on ? Icons.favorite : Icons.favorite_border,
+    actionLabel: on ? null : context.l10n.undo,
+    onAction: on
+        ? null
+        : () => unawaited(
+            albums.setFavorite(imageId, true).catchError((Object _) {}),
+          ),
+  );
+}
+
 Future<void> showGallerySaveAlbumPicker(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final pick = await _pickAlbum(
     context,
-    title: '保存到',
+    title: context.l10n.saveTo,
     keyPrefix: 'save-album-choice',
+    includeFavorites: false,
     checked: (id: container.read(gallerySaveTargetProvider).albumId),
   );
   if (pick == null) return;
@@ -37,8 +73,9 @@ Future<void> showAlbumBrowsePicker(BuildContext context) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final pick = await _pickAlbum(
     context,
-    title: '选择相册',
+    title: context.l10n.chooseAlbum,
     keyPrefix: 'browse-album-choice',
+    includeFavorites: false,
     checked: (id: container.read(galleryBrowseAlbumProvider)),
   );
   if (pick == null) return;
@@ -56,7 +93,7 @@ Future<({String? id})?> showAlbumMovePicker(
   String? sourceAlbum,
 }) => _pickAlbum(
   context,
-  title: '移动到',
+  title: context.l10n.moveTo,
   keyPrefix: 'move-album-choice',
   exclude: sourceAlbum,
   includeAll: sourceAlbum != null,
@@ -68,6 +105,7 @@ Future<({String? id})?> _pickAlbum(
   required String keyPrefix,
   String? exclude,
   bool includeAll = true,
+  bool includeFavorites = true,
   ({String? id})? checked,
 }) => showModalBottomSheet<({String? id})>(
   context: context,
@@ -77,6 +115,7 @@ Future<({String? id})?> _pickAlbum(
     keyPrefix: keyPrefix,
     exclude: exclude,
     includeAll: includeAll,
+    includeFavorites: includeFavorites,
     checked: checked,
   ),
 );
@@ -90,6 +129,7 @@ class _AlbumChoiceSheet extends ConsumerWidget {
     required this.keyPrefix,
     this.exclude,
     this.includeAll = true,
+    this.includeFavorites = true,
     this.checked,
   });
 
@@ -99,6 +139,7 @@ class _AlbumChoiceSheet extends ConsumerWidget {
   /// 不列出的相册(移动时的来源相册)。
   final String? exclude;
   final bool includeAll;
+  final bool includeFavorites;
 
   /// 打勾的那一项;null = 不打勾。
   final ({String? id})? checked;
@@ -108,10 +149,14 @@ class _AlbumChoiceSheet extends ConsumerWidget {
     final albums = ref.watch(albumsProvider);
     final photos = ref.watch(galleryProvider).results;
     final cols = ref.watch(uiPrefsProvider).galleryColumns;
+    // 照相册墙的顺序,回收站不在其列
     final ids = <String?>[
       if (includeAll) null,
-      for (final album in albums.albums)
-        if (album.id != exclude) album.id,
+      for (final id in albums.order)
+        if (id != trashId &&
+            id != exclude &&
+            (includeFavorites || id != favoritesId))
+          id,
     ];
     final checked = this.checked;
     // 标题行、按钮、网格照相册首页(gallery_grid_sheet)那一页来,当前那本另外
@@ -153,7 +198,7 @@ class _AlbumChoiceSheet extends ConsumerWidget {
                             }
                           },
                     icon: const Icon(Icons.add, size: 18),
-                    label: const Text('新建'),
+                    label: Text(context.l10n.newLabel),
                   ),
                 ],
               ),
@@ -208,6 +253,7 @@ class _AlbumChoiceSheet extends ConsumerWidget {
                           items: items,
                         ),
                         cover: albumCoverOf(albums, id, items),
+                        coverIcon: albumCoverIcon(id),
                         // 当前那本:描边 + 左上角的勾,借多选的勾选圈来画;
                         // 其余几本不画空圈,免得看着像能多选
                         selecting: on,
@@ -276,7 +322,9 @@ class _AlbumNameDialogState extends ConsumerState<_AlbumNameDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.album == null ? '新建相册' : '重命名相册'),
+    title: Text(
+      widget.album == null ? context.l10n.newAlbum : context.l10n.renameAlbum,
+    ),
     scrollable: true,
     content: Column(
       mainAxisSize: MainAxisSize.min,
@@ -286,13 +334,16 @@ class _AlbumNameDialogState extends ConsumerState<_AlbumNameDialog> {
           autofocus: true,
           maxLength: 40,
           enabled: !_busy,
-          decoration: InputDecoration(labelText: '相册名称', errorText: _error),
+          decoration: InputDecoration(
+            labelText: context.l10n.albumName,
+            errorText: _error,
+          ),
           onSubmitted: (_) => _save(),
         ),
         if (widget.album == null)
           CheckboxListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('设为保存相册'),
+            title: Text(context.l10n.setAsSaveAlbum),
             value: _saveNewImages,
             onChanged: _busy
                 ? null
@@ -303,11 +354,11 @@ class _AlbumNameDialogState extends ConsumerState<_AlbumNameDialog> {
     actions: [
       TextButton(
         onPressed: _busy ? null : () => Navigator.pop(context),
-        child: const Text('取消'),
+        child: Text(context.l10n.cancel),
       ),
       FilledButton(
         onPressed: _busy ? null : _save,
-        child: Text(_busy ? '保存中…' : '保存'),
+        child: Text(_busy ? context.l10n.savingEllipsis : context.l10n.save),
       ),
     ],
   );

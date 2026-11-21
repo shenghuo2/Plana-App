@@ -7,6 +7,7 @@ import '../../core/auth/auth_mode.dart';
 import '../../core/auth/bot_session_store.dart';
 import '../../core/net/backend_client.dart';
 import '../../core/net/backend_config.dart';
+import '../../core/net/bot_socket.dart';
 import '../../core/net/bot_stream.dart';
 import '../../core/net/nai_client.dart';
 import '../../core/net/nai_gate.dart';
@@ -15,6 +16,7 @@ import '../generate/bot_request.dart';
 import '../generate/models.dart';
 import '../generate/nai_request.dart';
 import 'tag_models.dart';
+import '../../l10n/l10n.dart';
 
 /// 编辑器预览图生成:参数与提示词模板逐字对齐 web(useOCManager
 /// generatePreviewBase64 / useArtistManager buildPreviewPrompts)。
@@ -92,7 +94,7 @@ Future<Uint8List> generateTagPreview(
       artistPreviewPrompts(p)[slot % 4],
       _kArtistNegative,
     ),
-    _ => throw StateError('该分类不支持生成预览'),
+    _ => throw StateError(l10nNow.noPreviewForCat),
   };
 
   final s = GenerateState.initial().copyWith(
@@ -103,9 +105,10 @@ Future<Uint8List> generateTagPreview(
 
   if (ref.read(authModeProvider).value == AuthMode.bot) {
     final session = ref.read(botSessionProvider).value;
-    if (session == null) throw BackendException('需要 Bot 授权');
+    if (session == null) throw BackendException('暂未开放');
     final base = await ref.read(backendBaseProvider.future);
     if (base.isEmpty) throw BackendException('未配置后端地址');
+    BotSocket.instance.warm(base, session.sessionId);
     final client = ref.read(backendClientProvider);
     final params = buildBotParams(
       s,
@@ -131,13 +134,6 @@ Future<Uint8List> generateTagPreview(
     return out.first;
   }
 
-  final built = buildNaiPayload(
-    s,
-    presetId: 'none',
-    vibes: const [],
-    img2img: null,
-    charRefs: const [],
-  );
   // 同超分:预览也吃直连那条账号限额,得和生成抢同一个闸门,否则生成中开预览
   // 两边一起 429。整段流都在槽里 —— 拿到首帧就放槽的话后半程仍在占着连接。
   // paid:预览就是一张正经的图,该扣的点一分不少,所以没勾「参与点数生成」的 Key
@@ -150,10 +146,18 @@ Future<Uint8List> generateTagPreview(
     base,
   ) async {
     if (token == null || token.isEmpty) {
-      throw NaiException('请先在「我的」页设置 NovelAI API Token');
+      throw NaiException(l10nNow.setTokenFirst);
     }
     // 打哪台机器跟着闸门给的那把 Key 走。
     final client = ref.read(naiClientProvider(base));
+    final built = buildNaiPayload(
+      s,
+      presetId: 'none',
+      thirdParty: base.isNotEmpty,
+      vibes: const [],
+      img2img: null,
+      charRefs: const [],
+    );
     if (!streaming) {
       return client.generateImage(token: token, body: built.body);
     }
@@ -168,6 +172,6 @@ Future<Uint8List> generateTagPreview(
     }
     return got;
   });
-  if (last == null) throw NaiException('未收到图片数据');
+  if (last == null) throw NaiException(l10nNow.noImageData);
   return last;
 }

@@ -61,6 +61,53 @@ void main() {
     expect(r, (x: 1024, y: 0, w: 1024, h: 512));
   });
 
+  test('cropForMask:一处涂抹框得住,两处离得远框不下', () {
+    final g = MaskGrid(1536, 1024);
+    expect(cropForMask(g, 1024), isNull);
+    g.paintDot(200, 200, 48);
+    final one = cropForMask(g, 1024)!;
+    expect(one.x % 64 + one.y % 64, 0);
+    expect(g.hasCellsIn(one), isTrue);
+    expect(g.hasCellsOutside(one), isFalse);
+
+    // 第二笔在对角:外接矩形铺满整图,框只能盖住其中一段
+    g.paintDot(1400, 900, 48);
+    final two = cropForMask(g, 1024)!;
+    expect(two.w, lessThanOrEqualTo(1024));
+    expect(g.hasCellsOutside(two), isTrue);
+  });
+
+  test('cropForMask:用户拉过的框只扩不缩', () {
+    final g = MaskGrid(1536, 1024)..paintDot(600, 500, 48);
+    const keep = (x: 256, y: 256, w: 768, h: 512);
+    final r = cropForMask(g, 1024, keep: keep)!;
+    expect(r.x <= keep.x && r.y <= keep.y, isTrue);
+    expect(
+      r.x + r.w >= keep.x + keep.w && r.y + r.h >= keep.y + keep.h,
+      isTrue,
+    );
+  });
+
+  test('focusSendSize:不足 80 万像素放大到约 100 万,宽高取 64 倍数', () {
+    expect(focusSendSize(448, 448), (w: 1024, h: 1024));
+    expect(focusSendSize(256, 256), (w: 1024, h: 1024));
+    expect(focusSendSize(1024, 256), (w: 2048, h: 512));
+    expect(focusSendSize(1024, 768), (w: 1152, h: 832));
+    expect(focusSendSize(1024, 832), (w: 1024, h: 832)); // 够大不放大
+    for (final (w, h) in const [(320, 704), (576, 384), (1024, 512)]) {
+      final s = focusSendSize(w, h);
+      expect(s.w % 64 + s.h % 64, 0);
+      expect(s.w * s.h, lessThanOrEqualTo(1024 * 1024));
+    }
+  });
+
+  test('hasCellsOutside:按格心判,框边上的格不算出界', () {
+    final g = MaskGrid(512, 512)..cells[8 * 64 + 8] = 1; // 格 (8,8) = [64,72)²
+    expect(g.hasCellsOutside((x: 64, y: 64, w: 64, h: 64)), isFalse);
+    expect(g.hasCellsOutside((x: 72, y: 64, w: 64, h: 64)), isTrue);
+    expect(g.hasCellsOutside((x: 0, y: 128, w: 512, h: 64)), isTrue);
+  });
+
   test('maskBounds:空遮罩 null,末格按图边夹住;tightCropRect 结果不变', () {
     final g = MaskGrid(512, 512);
     expect(maskBounds(g), isNull);

@@ -6,16 +6,21 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/auth/bot_session_store.dart';
 import '../../core/net/backend_client.dart';
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
 import '../generate/generate_state.dart';
 import '../generate/models.dart';
 import '../generate/widgets/common.dart' show InfoNote, hintSnack;
 import '../generate/widgets/lora_card.dart' show LoraThumb, LoraTypeBadge;
 import 'lora_providers.dart';
+import 'lora_stack_ui.dart';
+import 'lora_stacks.dart';
 import 'lora_upload_sheet.dart';
+import 'lora_upload_task.dart';
 
 /// LoRA 管理器(anima / krea 出图渠道,结构对齐 web LoraManagerModal):
 /// 我的(我下载过的 + 我上传的,🗑=移出;无人拥有的 web 条目由后端回收)
+/// LoRA 堆(存下来的整组挂载;「应用」直接替换当前挂载并关页,见 lora_stacks.dart)
 /// 公共库(机房里的公开条目,⭐=加入/移出我的库,按人气排序)
 /// 在线搜索(Civitai 代理,ℹ=详情 ⬇=机房直拉下载,滚到底自动翻页)
 /// 整卡点选 → 底栏「确认挂载」写回创作页(上限 [kMaxActiveLoras] 个)。
@@ -32,6 +37,10 @@ class LoraManagerPage extends ConsumerStatefulWidget {
 
 const _kEdge = 16.0;
 
+/// 页签序:我的 · LoRA 堆 · 公共库 · 在线搜索。
+const _kTabStacks = 1;
+const _kTabOnline = 3;
+
 /// 上传入口的高度。空闲态是按钮、传输态是进度条,两者必须等高,
 /// 否则一开传整个列表会往下跳一格。
 const _kUploadBarHeight = 42.0;
@@ -44,7 +53,7 @@ const _cats = <(String, String)>[
 
 class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
     with SingleTickerProviderStateMixin {
-  late final TabController _tab = TabController(length: 3, vsync: this);
+  late final TabController _tab = TabController(length: 4, vsync: this);
   int _lastTabIndex = 0;
 
   /// 本页认哪个底模的库。进页时定死:模型只能在创作页换,本页开着时不会变,
@@ -67,7 +76,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
 
   // 上传自己的 LoRA:0~100 = 本机→server 的百分比,null = 没在传。
   // 传输跑在本页而不是上传面板里,面板关掉、切 tab 都不打断。
-  int? _uploadPct;
+  void Function()? _dropUploadHandler;
 
   /// server→机房的推送轮询,按 LR 编号一条一个(重进本页会给自己那些
   /// 还在推的条目重新接上)。
@@ -130,19 +139,27 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
       _lastTabIndex = _tab.index;
       setState(() {});
       // 切到在线页:没搜过、或搜索框在别的页被改过 → 重搜(省无谓请求,但不留旧词的结果)
-      if (_tab.index == 2 &&
+      if (_tab.index == _kTabOnline &&
           (!_onlineLoadedOnce || _onlineQuery != _search.trim())) {
         _searchDebounce?.cancel();
         _runSearch(reset: true);
       }
     });
     _onlineScroll.addListener(() {
-      if (_tab.index != 2 || _loadingOnline || _onlineCursor == null) return;
+      if (_tab.index != _kTabOnline ||
+          _loadingOnline ||
+          _onlineCursor == null) {
+        return;
+      }
       if (_onlineScroll.position.extentAfter < 400) {
         _autoPages = 0; // 用户自己滚到底,连翻计数重新起算
         _runSearch(reset: false);
       }
     });
+    // 后台上传结束时本页开着:由本页替用户选上并提示(生成页卡片就不再提示)
+    _dropUploadHandler = ref
+        .read(loraUploadTaskProvider.notifier)
+        .onFinished(_onUploadFinished);
     // 全集不在这儿拉:provider 常驻,首次 watch 才发请求,之后重开直接命中。
     // 但常驻也意味着重开时不会再触发 ref.listen —— 手上这份已有的值要自己看一眼
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -153,6 +170,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
 
   @override
   void dispose() {
+    _dropUploadHandler?.call();
     _searchDebounce?.cancel();
     for (final t in [..._pushTimers.values, ..._installTimers.values]) {
       t.cancel();
@@ -228,7 +246,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
   void _autoPageIfShort() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
-          _tab.index != 2 ||
+          _tab.index != _kTabOnline ||
           _loadingOnline ||
           _onlineCursor == null ||
           _autoPages >= _kMaxAutoPages ||
@@ -244,7 +262,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
 
   void _onSearchChanged(String v) {
     setState(() => _search = v);
-    if (_tab.index != 2) return; // 本地两页是纯前端过滤,切回在线页时再重搜
+    if (_tab.index != _kTabOnline) return; // 本地几页是纯前端过滤,切回在线页时再重搜
     _searchDebounce?.cancel();
     _searchDebounce = Timer(const Duration(milliseconds: 450), () {
       if (mounted) _startSearch();
@@ -345,63 +363,60 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
 
   // ---- 上传自己的 LoRA ----
 
-  /// 选文件填表 → 传给 server(它校验完只登记就返回,推进机房是它的后台活)。
-  /// 所以传完不算完:拿到编号后接着 [_watchPush] 盯推送,synced 才是能挂载。
+  /// 选文件填表 → 交给后台上传任务就返回([loraUploadTaskProvider]):传输和之后
+  /// 盯推送都不在本页,退出去出图也不断;结束时 [_onUploadFinished] 接。
   Future<void> _startUpload() async {
     final draft = await showLoraUploadSheet(context);
     if (draft == null || !mounted) return;
     final sid = await _sid();
     if (!mounted) return;
     if (sid == null) {
-      hintSnack(context, '需要 Bot 授权登录');
+      hintSnack(context, '暂未开放');
       return;
     }
-    setState(() => _uploadPct = 0);
-    try {
-      final r = await ref
-          .read(backendClientProvider)
-          .uploadLora(
-            sessionId: sid,
-            filePath: draft.path,
-            fileName: draft.fileName,
-            fileSize: draft.size,
-            displayName: draft.displayName,
-            triggerGroups: draft.triggerGroups,
-            type: draft.type,
-            public: draft.public,
-            base: _base, // 决定文件落 Volume 的哪个子目录 → 之后能被哪个渠道挂载
-            onProgress: (p) {
-              // 每块都回调(几百兆能有几千次),整数百分比不变就不重建
-              final v = (p * 100).clamp(0, 100).round();
-              if (!mounted || v == _uploadPct) return;
-              setState(() => _uploadPct = v);
-            },
-          );
-      if (!mounted) return;
-      if (!r.ok) {
-        hintSnack(context, r.message.isEmpty ? '上传失败' : r.message);
-        return;
-      }
-      await _loadInstalled();
-      final id = r.lrId;
-      if (!mounted || id == null) return;
-      if (r.dedup) {
-        // 同一个文件机房里已经有了,后端没重复存,直接给收藏了
-        final ok = _autoSelect(id);
-        hintSnack(
-          context,
-          r.message.isEmpty ? '该文件已在库中,已为你收藏' : r.message,
-          icon: ok ? Icons.check : Icons.info_outline,
+    final started = ref
+        .read(loraUploadTaskProvider.notifier)
+        .start(
+          sessionId: sid,
+          filePath: draft.path,
+          fileName: draft.fileName,
+          fileSize: draft.size,
+          displayName: draft.displayName,
+          triggerGroups: draft.triggerGroups,
+          type: draft.type,
+          public: draft.public,
+          base: _base, // 决定文件落 Volume 的哪个子目录 → 之后能被哪个渠道挂载
         );
-      } else {
-        hintSnack(context, '已接收,正在推送到机房…', icon: Icons.cloud_upload_outlined);
-        _watchPush(id);
-      }
-    } catch (e) {
-      if (mounted) hintSnack(context, '$e');
-    } finally {
-      if (mounted) setState(() => _uploadPct = null);
+    hintSnack(
+      context,
+      started ? '开始上传,可以返回继续出图,传完会提示' : '已经有 LoRA 在上传了,等它传完再传下一个',
+      icon: started ? Icons.cloud_upload_outlined : Icons.info_outline,
+    );
+  }
+
+  /// 后台上传有了结论、本页还开着:替用户选上(同底模才选)并提示。返回 true = 接走了。
+  bool _onUploadFinished(LoraUploadOutcome o) {
+    if (!mounted) return false;
+    final id = o.lrId;
+    if (!o.ok) {
+      hintSnack(context, '「${o.name}」${o.message}', icon: Icons.cloud_off);
+      return true;
     }
+    final ok = id != null && o.base == _base && _autoSelect(id);
+    if (o.dedup) {
+      hintSnack(
+        context,
+        o.message.isEmpty ? '该文件已在库中,已为你收藏' : o.message,
+        icon: ok ? Icons.check : Icons.info_outline,
+      );
+    } else {
+      hintSnack(
+        context,
+        ok ? '「${o.name}」已就绪并选中,点「确认挂载」生效' : '「${o.name}」已就绪',
+        icon: Icons.check,
+      );
+    }
+    return true;
   }
 
   /// 盯 server→机房的推送(3s 一问,对齐 web)。就绪→刷新列表并替用户选上;
@@ -479,7 +494,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
       final sid = await _sid();
       if (!mounted) return;
       if (sid == null) {
-        hintSnack(context, '需要 Bot 授权登录');
+        hintSnack(context, '暂未开放');
         return;
       }
       final r = await ref
@@ -606,7 +621,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
   /// 未授权(provider 抛 need-bot)给人话,其余原样透出。
   static String? _errText(Object? e) {
     if (e == null) return null;
-    if (e is StateError && e.message == 'need-bot') return '需要 Bot 授权登录';
+    if (e is StateError && e.message == 'need-bot') return '暂未开放';
     return '$e';
   }
 
@@ -666,13 +681,16 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
               onChanged: _onSearchChanged,
               textInputAction: TextInputAction.search,
               onSubmitted: (_) {
-                if (_tab.index == 2) _startSearch();
+                if (_tab.index == _kTabOnline) _startSearch();
               },
               decoration: InputDecoration(
                 isDense: true,
-                hintText: _tab.index == 2
-                    ? '搜索 Civitai 上的 ${_base == 'krea' ? 'Krea 2' : 'Anima'} LoRA…'
-                    : '搜索名称或触发词…',
+                hintText: switch (_tab.index) {
+                  _kTabOnline =>
+                    '搜索 Civitai 上的 ${_base == 'krea' ? 'Krea 2' : 'Anima'} LoRA…',
+                  _kTabStacks => '搜索 LoRA 堆…',
+                  _ => '搜索名称或触发词…',
+                },
                 prefixIcon: const Icon(Icons.search, size: 20),
                 suffixIcon: _search.isEmpty
                     ? null
@@ -682,11 +700,11 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
                         onPressed: () {
                           _searchCtl.clear();
                           setState(() => _search = '');
-                          if (_tab.index == 2) _startSearch();
+                          if (_tab.index == _kTabOnline) _startSearch();
                         },
                       ),
                 filled: true,
-                fillColor: scheme.surfaceContainerHigh,
+                fillColor: context.pageControlFill,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
@@ -704,6 +722,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
               controller: _tab,
               children: [
                 _mineTab(mine, firstLoad: firstLoad, error: error),
+                _stacksTab(async.hasValue ? all : null),
                 _communityTab(community, firstLoad: firstLoad, error: error),
                 _onlineTab(),
               ],
@@ -715,22 +734,22 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
     );
   }
 
-  // ---- 分段 Tab(视觉对齐 Vibe/画风管理器,3 段) ----
+  // ---- 分段 Tab(视觉对齐 Vibe/画风管理器,4 段) ----
   Widget _segTabs(ColorScheme scheme) {
     return SizedBox(
       height: 42,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: scheme.surfaceContainerHigh,
+          color: context.pageControlFill,
           borderRadius: BorderRadius.circular(12),
         ),
         child: AnimatedBuilder(
           animation: _tab.animation!,
           builder: (context, _) {
-            final t = _tab.animation!.value.clamp(0.0, 2.0);
+            final t = _tab.animation!.value.clamp(0.0, 3.0);
             return LayoutBuilder(
               builder: (context, c) {
-                final segW = c.maxWidth / 3;
+                final segW = c.maxWidth / 4;
                 return Stack(
                   alignment: Alignment.center,
                   children: [
@@ -741,7 +760,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
                       width: segW - 6,
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          color: scheme.surface,
+                          color: context.segThumb,
                           borderRadius: BorderRadius.circular(9),
                           boxShadow: [
                             BoxShadow(
@@ -756,8 +775,9 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
                     Row(
                       children: [
                         _segLabel(0, Icons.smartphone, '我的', t),
-                        _segLabel(1, Icons.dns_outlined, '公共库', t),
-                        _segLabel(2, Icons.public, '在线搜索', t),
+                        _segLabel(1, Icons.layers_outlined, 'LoRA 堆', t),
+                        _segLabel(2, Icons.dns_outlined, '公共库', t),
+                        _segLabel(3, Icons.public, '在线搜索', t),
                       ],
                     ),
                   ],
@@ -773,7 +793,11 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
   Widget _segLabel(int index, IconData icon, String text, double t) {
     final scheme = context.scheme;
     final sel = (1 - (t - index).abs()).clamp(0.0, 1.0);
-    final color = Color.lerp(scheme.onSurfaceVariant, scheme.onSurface, sel)!;
+    final color = Color.lerp(
+      scheme.onSurfaceVariant,
+      context.segLabel(scheme.onSurface),
+      sel,
+    )!;
     return Expanded(
       child: InkWell(
         borderRadius: BorderRadius.circular(9),
@@ -783,15 +807,19 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(icon, size: 15, color: color),
-              const SizedBox(width: 5),
-              Text(
-                text,
-                style: context.texts.labelLarge!.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.lerp(
-                    FontWeight.w500,
-                    FontWeight.w700,
-                    sel,
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.texts.labelLarge!.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.lerp(
+                      FontWeight.w500,
+                      FontWeight.w700,
+                      sel,
+                    ),
                   ),
                 ),
               ),
@@ -827,7 +855,7 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
                   text: mine.isEmpty ? '我的库还是空的' : '没有匹配的 LoRA',
                   action: mine.isEmpty
                       ? TextButton(
-                          onPressed: () => _tab.animateTo(2),
+                          onPressed: () => _tab.animateTo(_kTabOnline),
                           child: const Text('去在线下载 →'),
                         )
                       : null,
@@ -885,11 +913,11 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
   }
 
   /// 上传入口。传输期间整条按钮变成进度条(从左往右填),不另占位置 ——
-  /// 传输跑在本页,面板关掉、切 tab 都还看得见它走到哪了。
+  /// 传输跑在后台任务上,退出本页再回来也接得上进度。
   Widget _uploadEntry() {
     final scheme = context.scheme;
-    final pct = _uploadPct;
-    if (pct == null) {
+    final job = ref.watch(loraUploadTaskProvider);
+    if (job == null) {
       return OutlinedButton.icon(
         onPressed: _startUpload,
         icon: const Icon(Icons.upload_file, size: 18),
@@ -904,7 +932,8 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
     }
     // 100% 之后还要等服务端算完整份文件的 SHA 才回执,那段没进度可报:
     // 条填满不动,换个转圈告诉用户还没完
-    final verifying = pct >= 100;
+    final pct = job.pct;
+    final verifying = job.phase != LoraUploadPhase.sending;
     return Container(
       height: _kUploadBarHeight,
       clipBehavior: Clip.antiAlias,
@@ -939,7 +968,11 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
                   Icon(Icons.upload_file, size: 18, color: scheme.primary),
                 const SizedBox(width: 8),
                 Text(
-                  verifying ? '校验中…' : '上传中 $pct%',
+                  switch (job.phase) {
+                    LoraUploadPhase.sending => '上传中 $pct%,可以返回继续出图',
+                    LoraUploadPhase.verifying => '校验中…',
+                    LoraUploadPhase.pushing => '推送机房中…',
+                  },
                   style: context.texts.labelLarge!.copyWith(
                     color: scheme.primary,
                     fontWeight: FontWeight.w600,
@@ -950,6 +983,121 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
           ),
         ],
       ),
+    );
+  }
+
+  // ---- LoRA 堆 ----
+  /// [library] 为 null = 全集还没读到:列表照常显示,只是不标缺失、不让应用。
+  Widget _stacksTab(List<LoraCardInfo>? library) {
+    final all = ref.watch(loraStacksProvider).value ?? const <LoraStack>[];
+    final stacks = [
+      for (final s in all)
+        if (s.base == _base) s,
+    ];
+    final q = _search.trim().toLowerCase();
+    final items = q.isEmpty
+        ? stacks
+        : [
+            for (final s in stacks)
+              if (s.name.toLowerCase().contains(q) ||
+                  s.loras.any(
+                    (e) =>
+                        e.displayName.toLowerCase().contains(q) ||
+                        e.name.toLowerCase().contains(q),
+                  ))
+                s,
+          ];
+    final ready = ref
+        .watch(generateProvider.select((s) => s.loras))
+        .where((l) => l.pending == null)
+        .length;
+    final installed = library == null
+        ? null
+        : {for (final x in library) x.name};
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(_kEdge, 4, _kEdge, 8),
+          child: OutlinedButton.icon(
+            onPressed: ready == 0
+                ? null
+                : () => showSaveLoraStackDialog(context, ref),
+            icon: const Icon(Icons.layers_outlined, size: 18),
+            label: Text(
+              ready == 0 ? '当前没有挂载 LoRA' : '把当前挂载的 $ready 个存为 LoRA 堆',
+            ),
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size.fromHeight(_kUploadBarHeight),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: items.isEmpty
+              ? _emptyBody(
+                  icon: Icons.layers_outlined,
+                  text: stacks.isEmpty ? '还没有 LoRA 堆' : '没有匹配的 LoRA 堆',
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(_kEdge, 0, _kEdge, 16),
+                  itemCount: items.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 8),
+                  itemBuilder: (_, i) {
+                    final s = items[i];
+                    return LoraStackCard(
+                      key: ValueKey(s.id),
+                      stack: s,
+                      installed: installed,
+                      onApply: () => _applyStack(s),
+                      onDelete: () => _deleteStack(s),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// 整组替换当前挂载并关页。库里没有 / 未就绪的条目跳过并提示。
+  void _applyStack(LoraStack stack) {
+    final async = ref.read(installedLorasProvider(_base));
+    final library = async.value;
+    if (library == null) {
+      hintSnack(
+        context,
+        async.hasError ? '没读到 LoRA 库,暂时没法应用' : 'LoRA 库还在读取,稍等再应用',
+      );
+      return;
+    }
+    final r = resolveLoraStack(stack, library);
+    if (r.loras.isEmpty) {
+      hintSnack(context, '「${stack.name}」里的 LoRA 现在都用不了');
+      return;
+    }
+    ref.read(generateProvider.notifier).applyLoraStack(r.loras);
+    final skipped = [...r.missing, ...r.notReady];
+    hintSnack(
+      context,
+      skipped.isEmpty
+          ? '已应用「${stack.name}」'
+          : '已应用「${stack.name}」,跳过 ${skipped.length} 个用不了的:${skipped.join('、')}',
+      icon: Icons.layers_outlined,
+    );
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _deleteStack(LoraStack stack) async {
+    final stacks = ref.read(loraStacksProvider.notifier);
+    final index = await stacks.remove(stack.id);
+    if (index < 0 || !mounted) return;
+    hintSnack(
+      context,
+      '已删除「${stack.name}」',
+      icon: Icons.delete_outline,
+      actionLabel: '撤销',
+      onAction: () => stacks.restore(stack, index),
     );
   }
 
@@ -1815,40 +1963,49 @@ class _LoraManagerPageState extends ConsumerState<LoraManagerPage>
   }
 
   Widget _bottomBar(ColorScheme scheme, {required bool ready}) {
-    return SafeArea(
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 10),
+    return Docked(
+      child: DecoratedBox(
         decoration: BoxDecoration(
-          color: scheme.surface,
-          border: Border(
-            top: BorderSide(color: scheme.outlineVariant.withValues(alpha: .4)),
-          ),
-        ),
-        child: Row(
-          children: [
-            TextButton(
-              onPressed: _selected.isEmpty
-                  ? null
-                  : () => setState(_selected.clear),
-              child: Text(
-                '清空',
-                style: TextStyle(
-                  color: _selected.isEmpty ? null : scheme.error,
+          color: context.raisedFill(scheme.surface),
+          border: context.skin.float
+              ? null
+              : Border(
+                  top: BorderSide(
+                    color: scheme.outlineVariant.withValues(alpha: .4),
+                  ),
                 ),
-              ),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 10),
+            child: Row(
+              children: [
+                TextButton(
+                  onPressed: _selected.isEmpty
+                      ? null
+                      : () => setState(_selected.clear),
+                  child: Text(
+                    '清空',
+                    style: TextStyle(
+                      color: _selected.isEmpty ? null : scheme.error,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  // 全集没加载出来时确认会把已挂的误清空,禁掉
+                  onPressed: ready ? _confirm : null,
+                  child: Text('确认挂载 (${_selected.length})'),
+                ),
+              ],
             ),
-            const Spacer(),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              // 全集没加载出来时确认会把已挂的误清空,禁掉
-              onPressed: ready ? _confirm : null,
-              child: Text('确认挂载 (${_selected.length})'),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -1979,26 +2136,29 @@ class _CardShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    return Material(
-      color: selected
-          ? scheme.primary.withValues(alpha: .08)
-          : scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(14),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(10, 9, 6, 9),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: selected
-                  ? scheme.primary
-                  : scheme.outlineVariant.withValues(alpha: .35),
-              width: selected ? 1.5 : 1,
+    return Lifted(
+      radius: BorderRadius.circular(14),
+      child: Material(
+        color: selected
+            ? scheme.primary.withValues(alpha: .08)
+            : scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(10, 9, 6, 9),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: selected
+                    ? scheme.primary
+                    : scheme.outlineVariant.withValues(alpha: .35),
+                width: selected ? 1.5 : 1,
+              ),
             ),
+            child: child,
           ),
-          child: child,
         ),
       ),
     );

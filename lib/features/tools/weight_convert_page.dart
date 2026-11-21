@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/editor_theme.dart';
 import '../../core/util/prompt_convert.dart';
 import '../generate/generate_state.dart';
 import '../generate/widgets/common.dart' show hintSnack;
 import '../shell/shell_state.dart';
+import '../../l10n/l10n.dart';
 
 enum _Dir { sd2nai, nai2sd }
 
@@ -47,14 +49,14 @@ class _WeightConvertViewState extends ConsumerState<WeightConvertView> {
     final out = _output;
     if (out == null || out.isEmpty) return;
     Clipboard.setData(ClipboardData(text: out));
-    hintSnack(context, '已复制', icon: Icons.check_circle_outline);
+    hintSnack(context, context.l10n.copied, icon: Icons.check_circle_outline);
   }
 
   void _import() {
     final out = _output;
     if (out == null || out.isEmpty) return;
     ref.read(generateProvider.notifier).setPrompts(positive: out);
-    hintSnack(context, '已导入提示词', icon: Icons.download_done);
+    hintSnack(context, context.l10n.promptImported, icon: Icons.download_done);
     ref.read(shellIndexProvider.notifier).select(kTabCreate);
     Navigator.of(context).pop();
   }
@@ -98,7 +100,7 @@ class _WeightConvertViewState extends ConsumerState<WeightConvertView> {
                     visualDensity: VisualDensity.compact,
                     onChanged: (v) => setState(() => _stripLora = v ?? true),
                   ),
-                  Text('去 Lora', style: context.texts.bodySmall),
+                  Text(context.l10n.stripLora, style: context.texts.bodySmall),
                 ],
               ],
             ),
@@ -130,7 +132,7 @@ class _WeightConvertViewState extends ConsumerState<WeightConvertView> {
             FilledButton.icon(
               onPressed: _convert,
               icon: const Icon(Icons.swap_horiz, size: 19),
-              label: const Text('转换'),
+              label: Text(context.l10n.convert),
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(46),
               ),
@@ -139,20 +141,27 @@ class _WeightConvertViewState extends ConsumerState<WeightConvertView> {
               const SizedBox(height: 12),
               Expanded(
                 flex: 3,
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerLow,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: SingleChildScrollView(
-                    child: SelectableText.rich(
-                      TextSpan(
-                        style: mono(context, size: 13, weight: FontWeight.w400),
-                        children: _dir == _Dir.sd2nai
-                            ? _naiSpans(context, _output!)
-                            : _sdSpans(context, _output!),
+                child: Lifted(
+                  radius: BorderRadius.circular(14),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectableText.rich(
+                        TextSpan(
+                          style: mono(
+                            context,
+                            size: 13,
+                            weight: FontWeight.w400,
+                          ),
+                          children: _dir == _Dir.sd2nai
+                              ? _naiSpans(context, _output!)
+                              : _sdSpans(context, _output!),
+                        ),
                       ),
                     ),
                   ),
@@ -164,14 +173,15 @@ class _WeightConvertViewState extends ConsumerState<WeightConvertView> {
                   if (_dir == _Dir.sd2nai)
                     FilledButton.tonalIcon(
                       onPressed: _import,
+                      style: context.pageTonalStyle,
                       icon: const Icon(Icons.download, size: 18),
-                      label: const Text('导入提示词'),
+                      label: Text(context.l10n.importPrompt),
                     ),
                   const Spacer(),
                   FilledButton.icon(
                     onPressed: _copy,
                     icon: const Icon(Icons.content_copy, size: 17),
-                    label: const Text('复制结果'),
+                    label: Text(context.l10n.copyResult),
                   ),
                 ],
               ),

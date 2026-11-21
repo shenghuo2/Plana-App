@@ -3,9 +3,11 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
-import '../../features/assistant/session_store.dart';
+import '../../features/assistant/application/session_repository.dart';
+import '../../features/editor/data/trans_cache_store.dart';
 import '../../features/gallery/gallery_store.dart';
 import '../../features/gallery/albums/album_store.dart';
+import '../../features/generate/canvas_history.dart';
 import '../../features/generate/workspace_store.dart';
 import '../../features/stats/key_ledger.dart';
 import '../net/remote_image.dart';
@@ -26,6 +28,8 @@ class AppStores {
     this.assistant,
     this.prefs,
     this.albums,
+    this.history,
+    this.transCache,
   );
 
   final BlobStore blobs;
@@ -34,25 +38,34 @@ class AppStores {
   final AlbumStore albums;
   final KeyLedgerStore ledger;
 
-  /// AI 助手的对话存档,见 [AssistantStore]。
-  final AssistantStore assistant;
+  /// 画布历史,见 [CanvasHistoryStore]。
+  final CanvasHistoryStore history;
+
+  /// AI 助手的对话存档,见 [SessionRepository]。
+  final SessionRepository assistant;
 
   /// 非机密设置(主题/生成参数/编辑器…),见 [PrefsStore]。
   final PrefsStore prefs;
+
+  /// 后端翻回来的译名,见 [TransCacheStore]。
+  final TransCacheStore transCache;
 
   /// 测试用空档:临时目录、不读盘;写入尽力而为。
   factory AppStores.ephemeral() {
     final root = Directory.systemTemp.createTempSync('plana_stores');
     RemoteImageStore.bind(root);
     final blobs = BlobStore(root);
+    final workspace = WorkspaceStore(blobs, root);
     return AppStores._(
       blobs,
-      WorkspaceStore(blobs, root),
+      workspace,
       GalleryStore(blobs, root),
       KeyLedgerStore(root),
-      AssistantStore(blobs, root),
+      SessionRepository(blobs, root),
       PrefsStore.emptyForTest(root),
       AlbumStore(root),
+      CanvasHistoryStore(workspace, root),
+      TransCacheStore(root),
     );
   }
 
@@ -76,7 +89,8 @@ class AppStores {
     final gallery = GalleryStore(blobs, root);
     final albums = AlbumStore(root);
     final ledger = KeyLedgerStore(root);
-    final assistant = AssistantStore(blobs, root);
+    final assistant = SessionRepository(blobs, root);
+    final transCache = TransCacheStore(root);
     try {
       await blobs.ensureReady();
     } catch (_) {}
@@ -85,10 +99,14 @@ class AppStores {
     await workspace.load();
     await gallery.load();
     await albums.load(
-      liveImages: gallery.initialResults.map((r) => r.id).toSet(),
+      liveImages: {
+        for (final r in gallery.initialResults) r.id,
+        for (final t in gallery.initialTrash) t.image.id,
+      },
     );
     await ledger.load();
     await assistant.load();
+    await transCache.load();
     return AppStores._(
       blobs,
       workspace,
@@ -97,6 +115,8 @@ class AppStores {
       assistant,
       prefs,
       albums,
+      CanvasHistoryStore(workspace, root),
+      transCache,
     );
   }
 
@@ -106,22 +126,27 @@ class AppStores {
     gallery.flushIndex();
     ledger.flush();
     assistant.flush();
+    transCache.flush();
   }
 
   /// 启动后台维护(避开首帧,延迟几秒):清选图器缓存垃圾 + 远端图缓存裁剪
   /// + blob GC。
   void postBootMaintenance() {
+    final bootedAt = DateTime.now();
     Future<void>(() async {
       await Future<void>.delayed(const Duration(seconds: 6));
       await sweepPickerCache();
       await RemoteImageStore.trim();
       await clearRetiredRoleLexicon();
       try {
+        final canvases = workspace.initialCanvases?.canvases ?? const [];
+        await history.removeOrphans({for (final c in canvases) c.id}, bootedAt);
         final live = <String>{
           ...await workspace.liveRefs(),
           ...await gallery.liveRefs(),
           // 漏了这行 = AI 助手里用户带的图在启动第 6 秒被 GC 掉
           ...await assistant.liveRefs(),
+          ...await history.liveRefs(),
         };
         await blobs.gc(live);
       } catch (_) {}

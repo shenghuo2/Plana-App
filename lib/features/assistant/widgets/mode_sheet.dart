@@ -7,10 +7,12 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/ui/setting_row.dart';
 import '../../generate/widgets/common.dart' show dropFocusSoon;
 import '../assistant_mode.dart';
+import '../../../l10n/l10n.dart';
 
 IconData assistantModeIcon(AssistantMode m, {bool on = false}) => switch (m) {
   AssistantMode.normal => Icons.layers_clear_outlined,
@@ -44,25 +46,29 @@ class _ModeSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
+    final solid = context.skin.float;
+    final selFg = solid ? scheme.onPrimary : scheme.primary;
     return SettingSheet(
-      title: '对话模式',
+      title: context.l10n.chatMode,
       children: [
         for (final m in AssistantMode.values)
           ListTile(
             onTap: () => Navigator.pop(context, m),
             selected: m == current,
-            selectedTileColor: scheme.primaryContainer.withValues(alpha: .35),
+            selectedTileColor: solid
+                ? scheme.primary
+                : scheme.primaryContainer.withValues(alpha: .35),
             contentPadding: const EdgeInsets.symmetric(horizontal: 20),
             leading: Icon(
               m == current ? Icons.check_circle : assistantModeIcon(m),
               size: 21,
-              color: m == current ? scheme.primary : null,
+              color: m == current ? selFg : null,
             ),
             title: Text(
               assistantModeLabel(m),
               style: context.texts.bodyLarge!.copyWith(
                 fontWeight: m == current ? FontWeight.w700 : FontWeight.w500,
-                color: m == current ? scheme.primary : null,
+                color: m == current ? selFg : null,
               ),
             ),
           ),

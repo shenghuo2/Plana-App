@@ -7,10 +7,13 @@ import '../../core/store/app_stores.dart';
 import '../../core/store/storage_settings.dart';
 import '../generate/models.dart' show GenerateState;
 import '../generate/generation_controller.dart' show genNoticeProvider;
+import '../generate/section_layout.dart' show withSectionLayout;
 import 'albums/album_models.dart';
 import 'albums/album_state.dart';
+import 'gallery_dates.dart';
 import 'gallery_search.dart';
 import 'models.dart';
+import '../../l10n/l10n.dart';
 
 final galleryProvider = NotifierProvider<GalleryNotifier, GalleryState>(
   GalleryNotifier.new,
@@ -72,10 +75,17 @@ class GalleryZoomedNotifier extends Notifier<bool> {
 }
 
 class GalleryState {
-  const GalleryState({required this.results, required this.selectedId});
+  const GalleryState({
+    required this.results,
+    required this.selectedId,
+    this.trash = const [],
+  });
 
   final List<ResultImage> results;
   final String? selectedId;
+
+  /// 回收站,新删的在前。只有 galleryProvider 带着,浏览集合里是空的。
+  final List<TrashedImage> trash;
 
   bool get isEmpty => results.isEmpty;
 
@@ -91,9 +101,11 @@ class GalleryState {
     List<ResultImage>? results,
     String? selectedId,
     bool clearSelection = false,
+    List<TrashedImage>? trash,
   }) => GalleryState(
     results: results ?? this.results,
     selectedId: clearSelection ? null : selectedId ?? this.selectedId,
+    trash: trash ?? this.trash,
   );
 }
 
@@ -116,9 +128,11 @@ class GalleryNotifier extends Notifier<GalleryState> {
     ref.listen(storageSettingsProvider, (_, next) {
       if (next.hasValue) enforceCap();
     });
+    Future.microtask(purgeExpiredTrash);
     return GalleryState(
       results: store.initialResults,
       selectedId: store.initialSelectedId,
+      trash: store.initialTrash,
     );
   }
 
@@ -132,7 +146,7 @@ class GalleryNotifier extends Notifier<GalleryState> {
     final sel = keep.any((r) => r.id == state.selectedId)
         ? state.selectedId
         : (keep.isEmpty ? null : keep.first.id);
-    state = GalleryState(results: keep, selectedId: sel);
+    state = GalleryState(results: keep, selectedId: sel, trash: state.trash);
     final dropIds = [for (final r in drop) r.id];
     ref.read(appStoresProvider).gallery.deleteResultFiles(dropIds);
     ref.read(gallerySearchProvider.notifier).removeAll(dropIds);
@@ -146,6 +160,7 @@ class GalleryNotifier extends Notifier<GalleryState> {
         .gallery
         .scheduleIndex(
           results: state.results,
+          trash: state.trash,
           selectedId: state.selectedId,
           seq: _seq,
         );
@@ -189,7 +204,9 @@ class GalleryNotifier extends Notifier<GalleryState> {
       createdAt: DateTime.now().millisecondsSinceEpoch,
       batchIndex: batchIndex,
       inpaintFrom: inpaintFrom,
-      bytes: bytes,
+      bytes: input == null
+          ? bytes
+          : withSectionLayout(bytes, input.composedSections),
       input: snap,
     );
     // 检索索引同帧写入(input 在内存,零 IO)
@@ -267,7 +284,7 @@ class GalleryNotifier extends Notifier<GalleryState> {
             .organize({r.id}, {target.albumId!});
       } catch (_) {
         actual = const GallerySaveTarget.all();
-        ref.read(genNoticeProvider.notifier).show('图片已保存在全部作品，目标图库不可用或归类失败');
+        ref.read(genNoticeProvider.notifier).show(l10nNow.savedAllAlbumFailed);
       }
     }
     if (!ref.mounted || !state.results.any((e) => e.id == r.id)) return r;
@@ -306,17 +323,23 @@ class GalleryNotifier extends Notifier<GalleryState> {
         Object _,
       ) {
         if (ref.mounted) {
-          ref.read(genNoticeProvider.notifier).show('图片已删除，图库归属清理失败');
+          ref
+              .read(genNoticeProvider.notifier)
+              .show(l10nNow.deletedAlbumCleanupFailed);
         }
       }),
     );
+    _clearPreview(ids);
+  }
+
+  void _clearPreview(List<String> ids) {
     final preview = ref.read(galleryResultPreviewProvider);
     if (preview != null && ids.contains(preview.imageId)) {
       ref.read(galleryResultPreviewProvider.notifier).clear();
     }
   }
 
-  /// 删除单张或多张图片:状态移除 + 盘上文件一并删。
+  /// 删除单张或多张图片:移进回收站,文件与相册归属都留着,恢复时原样回来。
   /// 删除当前图片时，沿当前图库顺序选下一张；没有下一张则选上一张。
   void deleteResults(List<String> ids) {
     if (ids.isEmpty) return;
@@ -357,11 +380,85 @@ class GalleryNotifier extends Notifier<GalleryState> {
       // 删除产生的新选择也优先于仍在异步入库的结果。
       _selectionRevision++;
     }
-    state = GalleryState(results: keep, selectedId: sel);
-    ref.read(appStoresProvider).gallery.deleteResultFiles(ids);
-    ref.read(gallerySearchProvider.notifier).removeAll(ids);
-    _removeMemberships(ids);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    state = GalleryState(
+      results: keep,
+      selectedId: sel,
+      trash: [
+        for (final r in state.results)
+          if (drop.contains(r.id)) TrashedImage(r.stripped(), now),
+        ...state.trash,
+      ],
+    );
+    _clearPreview(ids);
     _persistIndex();
+  }
+
+  /// 从回收站恢复:按生成先后插回原位。返回恢复的张数。
+  int restoreTrash(Iterable<String> ids) {
+    final want = ids.toSet();
+    final back = [
+      for (final t in state.trash)
+        if (want.contains(t.image.id)) t.image,
+    ]..sort((a, b) => _before(a, b) ? -1 : (_before(b, a) ? 1 : 0));
+    if (back.isEmpty) return 0;
+    final merged = <ResultImage>[];
+    var i = 0;
+    for (final r in state.results) {
+      while (i < back.length && _before(back[i], r)) {
+        merged.add(back[i++]);
+      }
+      merged.add(r);
+    }
+    merged.addAll(back.skip(i));
+    state = state.copyWith(
+      results: merged,
+      trash: [
+        for (final t in state.trash)
+          if (!want.contains(t.image.id)) t,
+      ],
+    );
+    _persistIndex();
+    return back.length;
+  }
+
+  /// [a] 是否排在 [b] 前面(新→旧):先比生成时刻,同刻比编号。
+  static bool _before(ResultImage a, ResultImage b) =>
+      a.createdAt != b.createdAt
+      ? a.createdAt > b.createdAt
+      : _seqOf(a.id) > _seqOf(b.id);
+
+  static int _seqOf(String id) =>
+      id.startsWith('gen') ? int.tryParse(id.substring(3)) ?? -1 : -1;
+
+  /// 彻底删除回收站里的这些:文件、检索条目、相册归属一并清掉。
+  void purgeTrash(Iterable<String> ids) {
+    final drop = ids.toSet();
+    final gone = [
+      for (final t in state.trash)
+        if (drop.contains(t.image.id)) t.image.id,
+    ];
+    if (gone.isEmpty) return;
+    state = state.copyWith(
+      trash: [
+        for (final t in state.trash)
+          if (!drop.contains(t.image.id)) t,
+      ],
+    );
+    ref.read(appStoresProvider).gallery.deleteResultFiles(gone);
+    ref.read(gallerySearchProvider.notifier).removeAll(gone);
+    _removeMemberships(gone);
+    _persistIndex();
+  }
+
+  /// 超过 [kTrashKeepDays] 天的彻底删除。
+  void purgeExpiredTrash() {
+    if (!ref.mounted) return;
+    final now = DateTime.now();
+    purgeTrash([
+      for (final t in state.trash)
+        if (galleryDaysSince(t.deletedAt, now) >= kTrashKeepDays) t.image.id,
+    ]);
   }
 
   /// 清空图库(存储管理):内存态与盘上文件一并清,发号器保留不复用。

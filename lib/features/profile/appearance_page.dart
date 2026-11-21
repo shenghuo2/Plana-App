@@ -1,8 +1,14 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/theme_settings.dart';
+import '../../core/ui/theme_swatches.dart';
+import '../../core/util/haptics.dart';
+import '../../core/util/harmony_compat.dart';
+import '../../l10n/l10n.dart';
 import 'widgets/settings_ui.dart';
 
 class AppearancePage extends ConsumerWidget {
@@ -13,11 +19,22 @@ class AppearancePage extends ConsumerWidget {
     final ts = ref.watch(themeSettingsProvider);
     final notifier = ref.read(themeSettingsProvider.notifier);
     return Scaffold(
-      appBar: AppBar(title: const Text('外观与触感')),
+      appBar: AppBar(title: Text(context.l10n.appearanceHaptics)),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(14, 8, 14, 24),
         children: [
-          const SettingsLabel('深浅模式'),
+          SettingsLabel(context.l10n.language),
+          SettingsCard(
+            children: [
+              _LanguageRow(
+                value: ts.language,
+                onChanged: (v) =>
+                    notifier.patch((x) => x.copyWith(language: v)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SettingsLabel(context.l10n.themeMode),
           SettingsCard(
             children: [
               Padding(
@@ -25,13 +42,19 @@ class AppearancePage extends ConsumerWidget {
                 child: SizedBox(
                   width: double.infinity,
                   child: SegmentedButton<ThemeMode>(
-                    segments: const [
+                    segments: [
                       ButtonSegment(
                         value: ThemeMode.system,
-                        label: Text('跟随系统'),
+                        label: Text(context.l10n.followSystem),
                       ),
-                      ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
-                      ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
+                      ButtonSegment(
+                        value: ThemeMode.light,
+                        label: Text(context.l10n.themeLight),
+                      ),
+                      ButtonSegment(
+                        value: ThemeMode.dark,
+                        label: Text(context.l10n.themeDark),
+                      ),
                     ],
                     selected: {ts.mode},
                     onSelectionChanged: (s) =>
@@ -43,35 +66,20 @@ class AppearancePage extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('主题色'),
-          SettingsCard(
+          SettingsLabel(context.l10n.themeColor),
+          const SettingsCard(
             children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    for (final s in themeSeeds)
-                      _Swatch(
-                        seed: s,
-                        selected: s.key == ts.seed.key,
-                        onTap: () =>
-                            notifier.patch((x) => x.copyWith(seedKey: s.key)),
-                      ),
-                  ],
-                ),
-              ),
+              Padding(padding: EdgeInsets.all(16), child: ThemeSwatches()),
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('底部导航'),
+          SettingsLabel(context.l10n.bottomNav),
           SettingsCard(
             children: [
               _SwitchRow(
                 icon: Icons.auto_awesome,
-                title: '显示 AI 助手',
-                subtitle: '关掉后底栏不再显示 AI 入口',
+                title: context.l10n.showAssistant,
+                subtitle: context.l10n.showAssistantSub,
                 value: ts.showAssistant,
                 onChanged: (v) =>
                     notifier.patch((x) => x.copyWith(showAssistant: v)),
@@ -79,12 +87,12 @@ class AppearancePage extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('创作页'),
+          SettingsLabel(context.l10n.createPage),
           SettingsCard(
             children: [
               _SwitchRow(
                 icon: Icons.view_agenda_outlined,
-                title: '紧凑角色卡',
+                title: context.l10n.compactCharCards,
                 value: ts.compactCharCards,
                 onChanged: (v) =>
                     notifier.patch((x) => x.copyWith(compactCharCards: v)),
@@ -92,18 +100,108 @@ class AppearancePage extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 16),
-          const SettingsLabel('触感'),
+          SettingsLabel(context.l10n.haptics),
           SettingsCard(
             children: [
               _SwitchRow(
                 icon: Icons.vibration,
-                title: '振动反馈',
+                title: context.l10n.hapticFeedback,
                 value: ts.haptics,
                 onChanged: (v) => notifier.patch((x) => x.copyWith(haptics: v)),
               ),
             ],
           ),
+          if (Platform.isAndroid) ...[
+            const SizedBox(height: 16),
+            SettingsLabel(context.l10n.galleryPicker),
+            SettingsCard(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                  child: SizedBox(
+                    width: double.infinity,
+                    // 没选过时按机型默认显示(容器里默认系统),检测返回前不选中
+                    child: FutureBuilder<bool>(
+                      future: isHarmonyCompatContainer,
+                      builder: (context, snap) {
+                        final system = ts.systemPicker ?? snap.data;
+                        return SegmentedButton<bool>(
+                          segments: [
+                            ButtonSegment(
+                              value: false,
+                              label: Text(context.l10n.inApp),
+                            ),
+                            ButtonSegment(
+                              value: true,
+                              label: Text(context.l10n.system),
+                            ),
+                          ],
+                          selected: {?system},
+                          emptySelectionAllowed: true,
+                          onSelectionChanged: (s) {
+                            if (s.isEmpty) return;
+                            notifier.patch(
+                              (x) => x.copyWith(systemPicker: s.first),
+                            );
+                          },
+                          showSelectedIcon: false,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+/// 界面语言下拉。语言名各用本语言写,切错了也认得回来。
+class _LanguageRow extends StatelessWidget {
+  const _LanguageRow({required this.value, required this.onChanged});
+
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    final options = {
+      '': context.l10n.followSystem,
+      'zh': '中文',
+      'en': 'English',
+      'ja': '日本語',
+    };
+    return PopupMenuButton<String>(
+      tooltip: context.l10n.uiLanguage,
+      position: PopupMenuPosition.under,
+      onSelected: (v) {
+        if (v == value) return;
+        Haptics.selection();
+        onChanged(v);
+      },
+      itemBuilder: (_) => [
+        for (final e in options.entries)
+          PopupMenuItem(
+            value: e.key,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(e.value),
+              trailing: e.key == value
+                  ? Icon(Icons.check, size: 18, color: scheme.primary)
+                  : null,
+            ),
+          ),
+      ],
+      child: SettingsRow(
+        icon: Icons.translate,
+        title: context.l10n.uiLanguage,
+        value: options[value],
+        dropdown: true,
       ),
     );
   }
@@ -163,56 +261,6 @@ class _SwitchRow extends StatelessWidget {
             const SizedBox(width: 8),
             Switch(value: value, onChanged: onChanged),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Swatch extends StatelessWidget {
-  const _Swatch({
-    required this.seed,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final ThemeSeed seed;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = context.scheme;
-    final onColor =
-        ThemeData.estimateBrightnessForColor(seed.color) == Brightness.dark
-        ? Colors.white
-        : Colors.black87;
-    return Tooltip(
-      message: seed.label,
-      child: InkWell(
-        onTap: onTap,
-        customBorder: const CircleBorder(),
-        child: AnimatedContainer(
-          duration: Motion.fast,
-          width: 44,
-          height: 44,
-          padding: const EdgeInsets.all(3),
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(
-              width: 2,
-              color: selected ? scheme.onSurface : Colors.transparent,
-            ),
-          ),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: seed.color,
-              shape: BoxShape.circle,
-            ),
-            child: selected
-                ? Icon(Icons.check, size: 18, color: onColor)
-                : null,
-          ),
         ),
       ),
     );

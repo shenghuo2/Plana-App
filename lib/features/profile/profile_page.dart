@@ -1,19 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/theme/app_skin.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/ui/scroll_memory.dart';
 import '../generate/preset_manage_page.dart';
 import '../generate/widgets/common.dart' show sharedAxisRoute;
-import '../migrate/web_backup_page.dart';
 import '../stats/stats_page.dart';
 import '../tools/tools_page.dart';
 import 'about_page.dart';
 import 'account_page.dart';
 import 'appearance_page.dart';
+import 'backup_page.dart';
 import 'cloud_storage_page.dart';
 import 'gen_settings_page.dart';
 import 'storage_page.dart';
+import '../../l10n/l10n.dart';
 
 class ProfilePage extends ConsumerWidget {
   const ProfilePage({super.key});
@@ -34,28 +36,22 @@ class ProfilePage extends ConsumerWidget {
             children: [
               Expanded(
                 child: Text(
-                  '我的',
+                  context.l10n.tabProfile,
                   style: context.texts.headlineSmall!.copyWith(
                     fontWeight: FontWeight.w700,
                   ),
                 ),
               ),
-              // 这两个都不是"设置项",不值得在列表里占一张与存储管理等宽的卡。
-              // 导入备份更是一次性的迁移动作,常驻列表里只会天天碍眼。
-              //
-              // 但只挂两枚裸图标又太哑:info 还算通用,import_export 那枚
-              // 没人猜得出是「把 web 的备份搬进来」。各配两个字。
+              // 这两个都不是"设置项",不在列表里占卡;图标各配两个字。
               _HeaderBtn(
-                icon: Icons.import_export,
-                // 不叫「同步」:这是选文件→预览→落库的单向一次性导入,
-                // 手机这边的改动不会回流,叫同步会让人等一个不存在的回程。
-                label: '导入',
-                onTap: () => push(const WebBackupPage()),
+                icon: Icons.settings_backup_restore,
+                label: context.l10n.backup,
+                onTap: () => push(const BackupPage()),
               ),
               const SizedBox(width: 8),
               _HeaderBtn(
                 icon: Icons.info_outline,
-                label: '关于',
+                label: context.l10n.about,
                 onTap: () => push(const AboutPage()),
               ),
             ],
@@ -70,13 +66,15 @@ class ProfilePage extends ConsumerWidget {
               children: [
                 _EntryCard(
                   icon: Icons.manage_accounts_outlined,
-                  title: '账号与接入',
-                  subtitle: 'Token 与 Bot 授权',
+                  filledIcon: Icons.manage_accounts,
+                  title: context.l10n.accountAccess,
+                  subtitle: context.l10n.accountAccessSub,
                   onTap: () => push(const AccountPage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.cloud_outlined,
+                  filledIcon: Icons.cloud,
                   title: '云存储',
                   subtitle: '远端图库推送',
                   onTap: () => push(const CloudStoragePage()),
@@ -84,43 +82,49 @@ class ProfilePage extends ConsumerWidget {
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.query_stats,
-                  title: '统计',
-                  subtitle: '用量 · 账单 · 全平台统计',
+                  filledIcon: Icons.query_stats,
+                  title: context.l10n.stats,
+                  subtitle: context.l10n.statsSub,
                   onTap: () => push(const StatsPage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.bookmark_outline,
-                  title: '提示词预设',
-                  subtitle: '正负面提示词模板',
+                  filledIcon: Icons.bookmark,
+                  title: context.l10n.promptPresets,
+                  subtitle: context.l10n.promptPresetsSub,
                   onTap: () => push(const PromptPresetManagePage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.tune,
-                  title: '生成设置',
-                  subtitle: '自动重试 · 功能模块 · 默认保存',
+                  filledIcon: Icons.tune,
+                  title: context.l10n.genSettings,
+                  subtitle: context.l10n.genSettingsSub,
                   onTap: () => push(const GenSettingsPage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.handyman_outlined,
-                  title: '工具箱',
-                  subtitle: '权重转换 · 图片元数据',
+                  filledIcon: Icons.handyman,
+                  title: context.l10n.toolbox,
+                  subtitle: context.l10n.toolboxSub,
                   onTap: () => push(const ToolsPage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.color_lens_outlined,
-                  title: '外观与触感',
-                  subtitle: '主题配色 · 振动反馈',
+                  filledIcon: Icons.color_lens,
+                  title: context.l10n.appearanceHaptics,
+                  subtitle: context.l10n.appearanceSub,
                   onTap: () => push(const AppearancePage()),
                 ),
                 const SizedBox(height: 10),
                 _EntryCard(
                   icon: Icons.storage,
-                  title: '存储管理',
-                  subtitle: '空间占用与清理',
+                  filledIcon: Icons.storage,
+                  title: context.l10n.storage,
+                  subtitle: context.l10n.storageSub,
                   onTap: () => push(const StoragePage()),
                 ),
               ],
@@ -136,12 +140,16 @@ class ProfilePage extends ConsumerWidget {
 class _EntryCard extends StatelessWidget {
   const _EntryCard({
     required this.icon,
+    required this.filledIcon,
     required this.title,
     required this.subtitle,
     required this.onTap,
   });
 
   final IconData icon;
+
+  /// 浮卡样式下用的实心图标
+  final IconData filledIcon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
@@ -149,43 +157,56 @@ class _EntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    return Material(
-      color: scheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 15, 11, 15),
-          child: Row(
-            children: [
-              Icon(icon, size: 24, color: scheme.onSurfaceVariant),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: context.texts.bodyLarge!.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.texts.bodySmall!.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
+    return Lifted(
+      radius: BorderRadius.circular(16),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 15, 11, 15),
+            child: Row(
+              children: [
+                // 浮卡样式用实心主色图标
+                SizedBox.square(
+                  dimension: 32,
+                  child: Icon(
+                    context.skin.float ? filledIcon : icon,
+                    size: 28,
+                    color: context.skin.float
+                        ? scheme.primary
+                        : scheme.onSurfaceVariant,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 4),
-              Icon(Icons.chevron_right, size: 20, color: scheme.outline),
-            ],
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: context.texts.bodyLarge!.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.texts.bodySmall!.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Icon(Icons.chevron_right, size: 20, color: scheme.outline),
+              ],
+            ),
           ),
         ),
       ),
@@ -209,7 +230,7 @@ class _HeaderBtn extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     return Material(
-      color: scheme.surfaceContainerHigh,
+      color: context.pageControlFill,
       borderRadius: BorderRadius.circular(16),
       clipBehavior: Clip.antiAlias,
       child: InkWell(

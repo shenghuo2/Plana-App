@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/store/app_stores.dart';
 import 'models.dart';
 import 'prompt_sections.dart';
+import '../../l10n/l10n.dart';
 
 export 'models.dart'
     show GenProvider, isAnimaModel, providerLabel, providerOfModel;
@@ -25,10 +26,8 @@ enum GenModule {
   img2img,
   lora,
   hires,
-  animaNl,
   kreaStyleRef,
   kreaLora,
-  kreaPrompt,
 }
 
 /// 注册表条目:图标与名称同主页卡片,管理页与卡片一眼对上。
@@ -71,12 +70,6 @@ const kGenModuleDefs = <GenModuleDef>[
   ),
   GenModuleDef(GenModule.img2img, Icons.image_outlined, '图生图'),
   GenModuleDef(
-    GenModule.animaNl,
-    Icons.format_align_left,
-    '自然语言',
-    provider: GenProvider.anima,
-  ),
-  GenModuleDef(
     GenModule.lora,
     Icons.auto_awesome_outlined,
     'LoRA',
@@ -92,16 +85,6 @@ const kGenModuleDefs = <GenModuleDef>[
     GenModule.kreaStyleRef,
     Icons.palette_outlined,
     '风格参考',
-    provider: GenProvider.krea,
-  ),
-  // 与 anima 的 animaNl **同名同图标**(对用户而言就是同一件事:让 AI 写自然
-  // 语言),但内部行为相反,改代码时别混:
-  //   animaNl     tag 是骨架、句子是补充 → 结果**追加**到正向词末尾(插入 / 移出)
-  //   kreaPrompt  整条 prompt 就是一段自然语言 → 结果**替换**原文(替换 / 还原)
-  GenModuleDef(
-    GenModule.kreaPrompt,
-    Icons.format_align_left,
-    '自然语言',
     provider: GenProvider.krea,
   ),
   // krea 的 LoRA 单开一个 key(不复用 [GenModule.lora]):启用位是按 key 全局
@@ -130,14 +113,10 @@ const kDefaultOrderByProvider = <GenProvider, List<GenModule>>{
     GenModule.charRef,
     GenModule.img2img,
   ],
-  GenProvider.anima: [GenModule.animaNl, GenModule.lora, GenModule.hires],
+  GenProvider.anima: [GenModule.lora, GenModule.hires],
   // LoRA 在上:挂 LoRA 是每次出图都要过一眼的常规动作,风格参考是偶尔才用的
   // 附加项(还只有 Turbo 档好使),常用的放手边。
-  GenProvider.krea: [
-    GenModule.kreaLora,
-    GenModule.kreaPrompt,
-    GenModule.kreaStyleRef,
-  ],
+  GenProvider.krea: [GenModule.kreaLora, GenModule.kreaStyleRef],
 };
 
 class GenModuleSettings {
@@ -247,12 +226,14 @@ GenerateState stripHiddenModules(GenerateState s, GenModuleSettings ms) {
   if (!on(GenModule.character) && out.characters.isNotEmpty) {
     out = out.copyWith(characters: const []);
   }
-  // 角色槽位按模型截断(nai5 攒的 20 张切回 V4 只有前 6 张进载荷):超出的
-  // 发给 NAI 是未定义行为。截前 N 张与卡片顺序一致,卡头徽章同步标红,
-  // token 读数(countedCharacters)也走同一口径 —— 读数与载荷不许分叉。
-  final charCap = maxCharactersOf(model);
-  if (on(GenModule.character) && out.characters.length > charCap) {
-    out = out.copyWith(characters: out.characters.take(charCap).toList());
+  // 角色按模型上限收口,只数启用的(见 _withinCharCap):超出的发给 NAI 是
+  // 未定义行为。卡头徽章同步标红,token 读数(countedCharacters)也走同一口径
+  // —— 读数与载荷不许分叉。
+  if (on(GenModule.character)) {
+    final capped = _withinCharCap(out.characters, model);
+    if (!identical(capped, out.characters)) {
+      out = out.copyWith(characters: capped);
+    }
   }
   if (!on(GenModule.vibe) && out.vibes.isNotEmpty) {
     out = out.copyWith(vibes: const []);
@@ -266,6 +247,7 @@ GenerateState stripHiddenModules(GenerateState s, GenModuleSettings ms) {
     if (out.img2img != null) out = out.copyWith(img2img: null);
     if (out.inpaint != null) out = out.copyWith(inpaint: null);
   }
+  out = withoutInpaintVibes(out);
   // LoRA 挂载列表两个父类共用一份,但启用位分两个 key —— 按当前模型那个判。
   if (!on(loraModuleOf(model)) && out.loras.isNotEmpty) {
     out = out.copyWith(loras: const []);
@@ -273,9 +255,6 @@ GenerateState stripHiddenModules(GenerateState s, GenModuleSettings ms) {
   if (!on(GenModule.kreaStyleRef) && out.kreaStyleRefs.isNotEmpty) {
     out = out.copyWith(kreaStyleRefs: const []);
   }
-  // 两张自然语言卡(animaNl / kreaPrompt)都没有可剥的数据:产出的文字一旦被
-  // 写进/替换进正向词,那之后就是提示词本身(换个模型照样发)。模块隐藏只是收走
-  // 卡片,不该反手改用户的词。
   // hires 没有独立数据,「剥离」= 关掉开关(配置本身留着,模块恢复即回来)
   if (!on(GenModule.hires) && out.params.hires.enabled) {
     out = out.copyWith(
@@ -284,15 +263,23 @@ GenerateState stripHiddenModules(GenerateState s, GenModuleSettings ms) {
       ),
     );
   }
-  // 重绘按它自己那块的尺寸发(局部是裁切区、扩图是垫大后的整张):尺寸跟着
-  // 画布走,重绘却是全局一份,切了画布,画布那个尺寸就不是这块的了。请求、
-  // 贴回、估价都读这份快照的宽高。
-  if (out.inpaint?.sendSize case (final w, final h)
-      when w != out.params.width || h != out.params.height) {
-    out = out.copyWith(params: out.params.copyWith(width: w, height: h));
+  // 重绘按它自己那块的尺寸发(局部是裁切区、扩图是垫大后的整张):存入后再改
+  // 尺寸,画布那个尺寸就不是这块的了。请求、贴回、估价都读这份快照的宽高。
+  if (out.inpaint?.sendSize case (
+    final w,
+    final h,
+  ) when w != out.params.width || h != out.params.height) {
+    out = out.copyWith(
+      params: out.params.copyWith(width: w, height: h),
+    );
   }
   return out;
 }
+
+/// 重绘不带 Vibe(同官方:V4 / V4.5 的重绘不收 Vibe,V5 本来没有)。
+/// 画布里的 Vibe 原样留着,去掉遮罩就照常发。
+GenerateState withoutInpaintVibes(GenerateState s) =>
+    s.inpaint != null && s.vibes.isNotEmpty ? s.copyWith(vibes: const []) : s;
 
 /// 把快照适配到**另一个模型**:只按型号能力剥,不看用户的模块显隐。
 ///
@@ -311,11 +298,25 @@ GenerateState retargetModel(GenerateState s, String model) {
   if (!crSupportsModel(model) && out.charRefs.isNotEmpty) {
     out = out.copyWith(charRefs: const []);
   }
-  final cap = maxCharactersOf(model);
-  if (out.characters.length > cap) {
-    out = out.copyWith(characters: out.characters.take(cap).toList());
+  final capped = _withinCharCap(out.characters, model);
+  if (!identical(capped, out.characters)) {
+    out = out.copyWith(characters: capped);
   }
   return out;
+}
+
+/// 启用数超出模型上限时,去掉排在后面的那几张启用卡;停用的不占额度,原样留着。
+List<CharacterPrompt> _withinCharCap(
+  List<CharacterPrompt> chars,
+  String model,
+) {
+  final cap = maxCharactersOf(model);
+  if (chars.where((c) => c.enabled).length <= cap) return chars;
+  var kept = 0;
+  return [
+    for (final c in chars)
+      if (!c.enabled || ++kept <= cap) c,
+  ];
 }
 
 /// 真正会进载荷、因而该计入 token 读数的角色串。
@@ -329,11 +330,11 @@ GenerateState retargetModel(GenerateState s, String model) {
 /// 角色切回去还是关着,anima 下被杀进程也不会把启用位丢掉。
 List<CharacterPrompt> countedCharacters(GenerateState s, GenModuleSettings ms) {
   if (!ms.isVisibleFor(GenModule.character, s.params.model)) return const [];
-  // take:槽位外的角色不进载荷(见 stripHiddenModules),读数也不许算它们。
-  return [
-    for (final c in s.characters.take(maxCharactersOf(s.params.model)))
-      if (c.enabled) c,
-  ];
+  // take:超出上限的启用卡不进载荷(见 stripHiddenModules),读数也不许算它们。
+  return s.characters
+      .where((c) => c.enabled)
+      .take(maxCharactersOf(s.params.model))
+      .toList();
 }
 
 const _key = 'gen_modules';
@@ -370,3 +371,12 @@ class GenModulesNotifier extends AsyncNotifier<GenModuleSettings> {
     } catch (_) {}
   }
 }
+
+/// 模块名按界面语言显示;Bot 专属的几个保持原文。
+String genModuleLabel(AppLocalizations l, GenModuleDef d) => switch (d.key) {
+  GenModule.character => l.characters,
+  GenModule.vibe => l.vibeTransfer,
+  GenModule.charRef => l.preciseReference,
+  GenModule.img2img => l.img2img,
+  _ => d.label,
+};

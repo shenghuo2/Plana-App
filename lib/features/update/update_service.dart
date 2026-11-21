@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 import '../../core/app_info.dart';
 import '../../core/store/prefs_store.dart';
 import '../../core/util/log.dart';
+import '../../l10n/l10n.dart';
 
 /// 检查更新失败。`toString()` 直接是可展示文案。
 class UpdateException implements Exception {
@@ -218,7 +219,7 @@ Future<InstalledInfo> installedInfo() async {
 /// 用 `/releases` 列表而**不是** `/releases/latest` —— 后者会把预发布整个排除,
 /// 而我们发的就是 `1.0.0-beta.x`,用它等于永远查不到东西。
 ///
-/// [repo] 为空(尚未开源/没填仓库)时直接返回 null,不报错。
+/// [repo] 为空时直接返回 null。非 200 一律抛 [UpdateException]。
 Future<GithubRelease?> fetchLatestRelease(
   String current, {
   String repo = kUpdateGithubRepo,
@@ -231,29 +232,29 @@ Future<GithubRelease?> fetchLatestRelease(
           headers: const {'Accept': 'application/vnd.github+json'},
         )
         .timeout(const Duration(seconds: 15));
-    // 仓库不存在/还是私有 → 404,当作"暂无更新",不该报红
-    if (resp.statusCode == 404) return null;
-    if (resp.statusCode == 403) {
-      // 未鉴权的 API 限额是每小时 60 次/IP。有 24h 节流正常撞不到,
-      // 真撞到了也只是这次查不了,不值得吓用户。
+    if (resp.statusCode == 429 ||
+        (resp.statusCode == 403 &&
+            resp.headers['x-ratelimit-remaining'] == '0')) {
       logd('[update] GitHub API 限流');
-      return null;
+      throw UpdateException(l10nNow.ghRateLimited);
     }
     if (resp.statusCode != 200) {
-      throw UpdateException('检查更新失败(HTTP ${resp.statusCode})');
+      throw UpdateException(l10nNow.updateHttpFailed(resp.statusCode));
     }
     final j = jsonDecode(utf8.decode(resp.bodyBytes));
-    if (j is! List) throw const UpdateException('更新信息格式异常');
+    if (j is! List) throw UpdateException(l10nNow.updateBadFormat);
     return pickNewer(current, j);
   } on TimeoutException {
-    throw const UpdateException('检查更新超时,请检查网络后重试');
+    throw UpdateException(l10nNow.updateTimeout);
   } on SocketException {
-    throw const UpdateException('连不上 GitHub,请检查网络后重试');
+    throw UpdateException(l10nNow.cantReachGithub);
+  } on TlsException {
+    throw UpdateException(l10nNow.cantReachGithub);
   } on UpdateException {
     rethrow;
   } catch (e) {
     logd('[update] 检查更新异常: $e');
-    throw const UpdateException('检查更新失败,请稍后重试');
+    throw UpdateException(l10nNow.updateFailed);
   }
 }
 

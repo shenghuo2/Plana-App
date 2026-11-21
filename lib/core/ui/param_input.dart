@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/app_theme.dart';
 import '../util/haptics.dart';
+import '../../l10n/l10n.dart';
 
 /// 把 [v] 量化到 [divisions] 等分的刻度上。算法与 Flutter 自己的 `_discretize`
 /// 一致(归一化 → 取整 → 插值回去),换掉离散 Slider 后取值分毫不差。
@@ -152,12 +156,11 @@ class _ParamInputDialogState extends State<_ParamInputDialog> {
   @override
   void initState() {
     super.initState();
-    final init = widget.value
-        .clamp(widget.min, widget.max)
-        .toStringAsFixed(_decimals);
-    // 自动全选:进来就能直接覆写,省一次「先清空」
-    _ctrl = TextEditingController(text: init)
-      ..selection = TextSelection(baseOffset: 0, extentOffset: init.length);
+    _ctrl = TextEditingController(
+      text: widget.value
+          .clamp(widget.min, widget.max)
+          .toStringAsFixed(_decimals),
+    );
   }
 
   @override
@@ -196,12 +199,12 @@ class _ParamInputDialogState extends State<_ParamInputDialog> {
   void _submit() {
     final v = double.tryParse(_ctrl.text.trim());
     if (v == null) {
-      setState(() => _error = '请输入数字');
+      setState(() => _error = context.l10n.enterNumber);
       return;
     }
     // 留一点浮点容差:边界值(如 max=0.99)按位数打出来再读回来会差个尾数
     if (v < widget.min - 1e-9 || v > widget.max + 1e-9) {
-      setState(() => _error = '超出范围 $_range');
+      setState(() => _error = context.l10n.outOfRange(_range));
       return;
     }
     Navigator.pop(
@@ -239,7 +242,6 @@ class _ParamInputDialogState extends State<_ParamInputDialog> {
               Expanded(
                 child: TextField(
                   controller: _ctrl,
-                  autofocus: true,
                   textAlign: TextAlign.center,
                   style: mono(context, size: 18),
                   keyboardType: TextInputType.numberWithOptions(
@@ -276,8 +278,8 @@ class _ParamInputDialogState extends State<_ParamInputDialog> {
           Text(
             _error ??
                 (_step == null
-                    ? '范围 $_range'
-                    : '范围 $_range · 步长 ${_plain(_step)}'),
+                    ? context.l10n.rangeHint(_range)
+                    : context.l10n.rangeStepHint(_range, _plain(_step))),
             textAlign: TextAlign.center,
             style: context.texts.labelSmall!.copyWith(
               color: _error == null ? scheme.outline : scheme.error,
@@ -288,41 +290,83 @@ class _ParamInputDialogState extends State<_ParamInputDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text('取消'),
+          child: Text(context.l10n.cancel),
         ),
-        FilledButton(onPressed: _submit, child: const Text('确定')),
+        FilledButton(onPressed: _submit, child: Text(context.l10n.ok)),
       ],
     );
   }
 }
 
 /// 弹窗里的加减键。44dp 方键,圆角跟中间的输入框对齐;
-/// 到边界就传 null 走灰态。
-class _StepBtn extends StatelessWidget {
+/// 到边界就传 null 走灰态。长按连发,越按越快,到边界自停。
+class _StepBtn extends StatefulWidget {
   const _StepBtn({required this.icon, this.onTap});
 
   final IconData icon;
   final VoidCallback? onTap;
 
   @override
+  State<_StepBtn> createState() => _StepBtnState();
+}
+
+class _StepBtnState extends State<_StepBtn> {
+  Timer? _timer;
+  int _ticks = 0;
+
+  void _start() {
+    _ticks = 0;
+    _repeat();
+  }
+
+  /// 每次触发读最新的 [widget.onTap]:到边界变成 null 就停。
+  void _repeat() {
+    final tap = widget.onTap;
+    if (tap == null) return _stop();
+    tap();
+    _ticks++;
+    _timer = Timer(
+      Duration(milliseconds: math.max(40, 120 - _ticks * 8)),
+      _repeat,
+    );
+  }
+
+  void _stop() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  @override
+  void dispose() {
+    _stop();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final scheme = context.scheme;
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: SizedBox(
-          width: 44,
-          height: 44,
-          child: Icon(
-            icon,
-            size: 20,
-            color: onTap == null ? scheme.outlineVariant : scheme.primary,
+    final onTap = widget.onTap;
+    return GestureDetector(
+      onLongPressStart: onTap == null ? null : (_) => _start(),
+      onLongPressEnd: (_) => _stop(),
+      onLongPressCancel: _stop,
+      child: Material(
+        color: scheme.surfaceContainerHigh,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: scheme.outlineVariant),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Icon(
+              widget.icon,
+              size: 20,
+              color: onTap == null ? scheme.outlineVariant : scheme.primary,
+            ),
           ),
         ),
       ),

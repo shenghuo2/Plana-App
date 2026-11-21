@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 
 import '../util/log.dart';
 import 'backend_config.dart';
+import 'backend_http.dart';
 import 'nai_client.dart' show NaiUsage, parseNaiUsage;
 
 /// 后端请求失败(网络/非 2xx/格式)。`message` 为可直接展示的人类可读文案。
@@ -182,37 +183,6 @@ class CloudVibeMeta {
   }
 }
 
-/// 备份/恢复操作记录一条(`GET /api/user-vibes/backup-log`)。
-class BackupLogEntry {
-  BackupLogEntry({
-    required this.device,
-    required this.action,
-    required this.time,
-    required this.count,
-    required this.detail,
-  });
-
-  final String device;
-
-  /// `backup` | `restore`
-  final String action;
-
-  /// unix 秒。
-  final int time;
-  final int count;
-  final String detail;
-
-  bool get isBackup => action == 'backup';
-
-  factory BackupLogEntry.fromJson(Map<String, dynamic> j) => BackupLogEntry(
-    device: j['device']?.toString() ?? '未知设备',
-    action: j['action']?.toString() ?? 'backup',
-    time: (j['time'] as num?)?.toInt() ?? 0,
-    count: (j['vibe_count'] as num?)?.toInt() ?? 0,
-    detail: j['detail']?.toString() ?? '',
-  );
-}
-
 /// 公共画师串列表项(`GET /api/artists/list`)。
 class PublicArtistMeta {
   PublicArtistMeta({
@@ -310,6 +280,11 @@ class NaiQuota {
     this.isAdmin = false,
     this.freeMode = false,
     this.refillPerDay = 0,
+    this.sharedPool = true,
+    this.relayEnabled = false,
+    this.relayAvailable = true,
+    this.relayPrice = 0.05,
+    this.relayPriceLegacy = 0.05,
   });
 
   /// 今日余额(张)。服务端按秒连续回充,所以带小数 —— 显示时**向下**取整,
@@ -339,18 +314,58 @@ class NaiQuota {
   /// 每天回充多少张。
   final double refillPerDay;
 
+  /// 共享号渠道开着没有。false = NAI 出图全走中转(按张从钱包扣),上面几项
+  /// 额度不再生效。老服务端不下发时按开着算。
+  final bool sharedPool;
+
+  /// 自己开没开「中转出图」。
+  final bool relayEnabled;
+
+  /// 中转渠道本身能不能用(后台配没配好)。
+  final bool relayAvailable;
+
+  /// 中转单价(元 / 张):V5 / V4.5 及更早。
+  final double relayPrice;
+  final double relayPriceLegacy;
+
   /// 现在能出几张(余额 + 赠送)。
   int get available => (balance + extra).floor();
 
-  factory NaiQuota.fromJson(Map<String, dynamic> j) => NaiQuota(
-    balance: (j['daily_balance'] as num?)?.toDouble() ?? 0,
-    limit: (j['daily_limit'] as num?)?.toInt() ?? 0,
-    extra: (j['extra_balance'] as num?)?.toDouble() ?? 0,
-    activated: j['activated'] != false,
-    isAdmin: j['is_admin'] == true,
-    freeMode: j['free_mode'] == true,
-    refillPerDay: (j['refill_per_day'] as num?)?.toDouble() ?? 0,
+  /// 共享号已停用:点数、V5 额度都不再管用,NAI 能不能出图只看中转开关。
+  bool get relayOnly => !sharedPool;
+
+  NaiQuota copyWith({bool? relayEnabled, bool? relayAvailable}) => NaiQuota(
+    balance: balance,
+    limit: limit,
+    extra: extra,
+    activated: activated,
+    isAdmin: isAdmin,
+    freeMode: freeMode,
+    refillPerDay: refillPerDay,
+    sharedPool: sharedPool,
+    relayEnabled: relayEnabled ?? this.relayEnabled,
+    relayAvailable: relayAvailable ?? this.relayAvailable,
+    relayPrice: relayPrice,
+    relayPriceLegacy: relayPriceLegacy,
   );
+
+  factory NaiQuota.fromJson(Map<String, dynamic> j) {
+    final price = (j['relay_price'] as num?)?.toDouble() ?? 0.05;
+    return NaiQuota(
+      balance: (j['daily_balance'] as num?)?.toDouble() ?? 0,
+      limit: (j['daily_limit'] as num?)?.toInt() ?? 0,
+      extra: (j['extra_balance'] as num?)?.toDouble() ?? 0,
+      activated: j['activated'] != false,
+      isAdmin: j['is_admin'] == true,
+      freeMode: j['free_mode'] == true,
+      refillPerDay: (j['refill_per_day'] as num?)?.toDouble() ?? 0,
+      sharedPool: j['shared_pool'] != false,
+      relayEnabled: j['relay_enabled'] == true,
+      relayAvailable: j['relay_available'] != false,
+      relayPrice: price,
+      relayPriceLegacy: (j['relay_price_legacy'] as num?)?.toDouble() ?? price,
+    );
+  }
 }
 
 /// 一段用量统计(个人 `/api/user/stats` 与平台 `/api/platform/stats(/all)`
@@ -439,182 +454,273 @@ class HourlyHeat {
   final int totalDays;
 }
 
-/// 账单里「一个人」的一行。estimate 的 current_user 与 settlement 结构略异:
-/// settlement 直接给 `total_fee`;estimate 只给 `image_fee`/`anlas_fee`,总费
-/// 需两者相加(web 同款)。这里 totalFee 取 `total_fee`,缺省时回落到分项和。
-class BillingParty {
-  const BillingParty({
-    this.tierName = '免费',
-    this.imageCalls = 0,
-    this.v5Calls = 0,
-    this.localCalls = 0,
-    this.anlasUsed = 0,
-    this.relayCalls = 0,
-    this.relayFee = 0,
-    this.totalFee = 0,
+/// 元 → 分。服务端的金额是两位小数的元,直接乘 100 会带浮点尾巴
+/// (0.29 * 100 = 28.999999999999996),所以一律 round。
+int _yuanToFen(Object? v) => (((v as num?)?.toDouble() ?? 0) * 100).round();
+
+/// 钱包里的一笔流水(`/api/wallet` 的 `recent` 与 `/api/wallet/ledger` 的
+/// `items` 同结构)。
+///
+/// 2026-10-18 起服务端把原来的两本账 —— NAI 中转按月出账、租卡 / 视频由管理员
+/// 手动结算 —— 并成了钱包:每人一个余额,消费成功就实时扣一笔,充值和调整由
+/// 管理员登记。没有账期、结算日、分摊了,只剩这一本流水。
+class WalletEntry {
+  const WalletEntry({
+    required this.id,
+    required this.ts,
+    required this.amountFen,
+    this.kind = '',
+    this.title = '',
+    this.note = '',
   });
 
-  final String tierName;
+  final int id;
 
-  /// **分摊基数**:只含 NAI 出图。anima / krea 走算力账单按机时实付,不进这本账
-  /// (它们的张数在 [localCalls])。
-  final int imageCalls;
+  /// 北京时间 naive ISO,截到秒(`2026-10-18T14:02:03`)。
+  final String ts;
 
-  /// 其中的 V5 张数。V5 只有一点防误触容差,超了就整体进付费档 —— 不摆出来的话
-  /// 用户完全看不出自己为什么被划到付费档。
-  final int v5Calls;
+  /// 金额,**分**。扣款为负、入账为正。
+  ///
+  /// 服务端给的是元;换成整数分再用,当天合计不会攒出浮点误差,
+  /// 正负判断也不会被 -0.0 这类边角绊倒。
+  final int amountFen;
 
-  /// anima / krea 等自建后端张数。**不参与计费**,只用来说明「这些不进分摊」——
-  /// 不写的话,用自建后端的人对着自己的出图记录会以为这里少算了。
-  final int localCalls;
+  /// `nai` / `video` / `rental` / `topup`(充值)/ `adjust`(扣款调整)。
+  /// 只拿来挑图标 —— 配色看 [amountFen] 的正负,不看 kind。
+  final String kind;
 
-  final int anlasUsed;
+  /// 给人看的标题与一行说明,服务端拼好的(`NAI 出图` / `V5 Full · 832×1216`)。
+  final String title;
+  final String note;
 
-  /// 中转出图张数与金额(按张直计)。settlement / estimate 的 [totalFee] 已含这笔。
-  final int relayCalls;
-  final double relayFee;
+  bool get isCredit => amountFen > 0;
 
-  final double totalFee;
+  /// `MM-DD HH:mm`。按位切出来原样显示 —— 服务端给的就是北京时间,不用换算。
+  String get shortTime =>
+      ts.length >= 16 ? ts.substring(5, 16).replaceFirst('T', ' ') : ts;
 
-  factory BillingParty.fromJson(Map<String, dynamic> j) {
-    final total = (j['total_fee'] as num?)?.toDouble();
-    final imgFee = (j['image_fee'] as num?)?.toDouble() ?? 0;
-    final anlasFee = (j['anlas_fee'] as num?)?.toDouble() ?? 0;
-    return BillingParty(
-      tierName: j['tier_name'] as String? ?? '免费',
-      imageCalls: (j['image_calls'] as num?)?.toInt() ?? 0,
-      v5Calls: (j['v5_calls'] as num?)?.toInt() ?? 0,
-      localCalls: (j['local_calls'] as num?)?.toInt() ?? 0,
-      anlasUsed: (j['anlas_used'] as num?)?.toInt() ?? 0,
-      relayCalls: (j['relay_calls'] as num?)?.toInt() ?? 0,
-      relayFee: (j['relay_fee'] as num?)?.toDouble() ?? 0,
-      totalFee: total ?? (imgFee + anlasFee),
+  /// `HH:mm`,同一天的列表里不必再写日期。
+  String get clock => ts.length >= 16 ? ts.substring(11, 16) : ts;
+
+  factory WalletEntry.fromJson(Map<String, dynamic> j) => WalletEntry(
+    id: (j['id'] as num?)?.toInt() ?? 0,
+    ts: j['ts']?.toString() ?? '',
+    amountFen: _yuanToFen(j['amount']),
+    kind: j['kind']?.toString() ?? '',
+    title: j['title']?.toString() ?? '',
+    note: j['note']?.toString() ?? '',
+  );
+}
+
+/// 扣款的一个类目(`/api/wallet` 的 `categories`):按流水标题 + kind 汇总。
+class WalletCategory {
+  const WalletCategory({
+    required this.title,
+    this.kind = '',
+    this.count = 0,
+    this.amountFen = 0,
+  });
+
+  final String title;
+  final String kind;
+  final int count;
+
+  /// 这一类累计扣了多少(分,正数)。
+  final int amountFen;
+
+  factory WalletCategory.fromJson(Map<String, dynamic> j) => WalletCategory(
+    title: j['title']?.toString() ?? '',
+    kind: j['kind']?.toString() ?? '',
+    count: (j['count'] as num?)?.toInt() ?? 0,
+    amountFen: _yuanToFen(j['amount']),
+  );
+}
+
+/// 我的钱包(`GET /api/wallet`):余额、累计扣款 / 入账、在跑的租卡。
+class WalletSummary {
+  const WalletSummary({
+    this.userId = '',
+    this.nickname = '',
+    this.balanceFen = 0,
+    this.chargedFen = 0,
+    this.creditedFen = 0,
+    this.count = 0,
+    this.recent = const [],
+    this.categories = const [],
+    this.pendingRentalFen = 0,
+    this.pendingRentalCount = 0,
+    this.startFrom = '',
+    this.isAdmin = false,
+    this.pointsTenths,
+  });
+
+  final String userId;
+
+  /// bot 记下的昵称,可能为空。
+  final String nickname;
+
+  /// 余额(分)。**可以是负数** —— 消费成功就扣,不先看余额够不够。
+  final int balanceFen;
+
+  /// 累计扣款 / 累计入账(分,都是正数)。
+  final int chargedFen;
+  final int creditedFen;
+
+  /// 流水总笔数。
+  final int count;
+
+  /// 最近几笔(新→旧),条数看请求时的 limit。
+  final List<WalletEntry> recent;
+
+  /// 扣款按类目汇总,花得多的在前。老服务端没有这个字段时为空。
+  final List<WalletCategory> categories;
+
+  /// 还在跑的租卡累计到现在的钱(分)与台数。**还没扣** —— 租卡在关机那一刻
+  /// 才扣这一程,所以不在 [balanceFen] 里,界面上要单独说一句。
+  final int pendingRentalFen;
+  final int pendingRentalCount;
+
+  /// 钱包的起算日 `yyyy-MM-dd`:这天之前的消费不在钱包里。
+  final String startFrom;
+
+  /// **调用方**是不是管理员。
+  final bool isAdmin;
+
+  /// 点数余额(十分之一点)。点数没开或查不到时为 null。
+  final int? pointsTenths;
+
+  bool get owing => balanceFen < 0;
+
+  factory WalletSummary.fromJson(Map<String, dynamic> j) {
+    final p = (j['pending'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return WalletSummary(
+      userId: j['user_id']?.toString() ?? '',
+      nickname: j['nickname']?.toString() ?? '',
+      // 有整数的 balance_fen 就用它,没有再从元换算
+      balanceFen:
+          (j['balance_fen'] as num?)?.toInt() ?? _yuanToFen(j['balance']),
+      chargedFen: _yuanToFen(j['charged_total']),
+      creditedFen: _yuanToFen(j['credited_total']),
+      count: (j['count'] as num?)?.toInt() ?? 0,
+      recent: [
+        for (final e in (j['recent'] as List?) ?? const [])
+          if (e is Map) WalletEntry.fromJson(e.cast<String, dynamic>()),
+      ],
+      categories: [
+        for (final e in (j['categories'] as List?) ?? const [])
+          if (e is Map) WalletCategory.fromJson(e.cast<String, dynamic>()),
+      ],
+      pendingRentalFen: _yuanToFen(p['rental']),
+      pendingRentalCount: (p['rental_count'] as num?)?.toInt() ?? 0,
+      startFrom: j['start_from']?.toString() ?? '',
+      isAdmin: j['is_admin'] == true,
+      pointsTenths: ((j['points'] as Map?)?['balance_tenths'] as num?)?.toInt(),
     );
   }
 }
 
-/// 一档阶梯的分布(人数/总张数/总费用),用于账单页的阶梯表。
-typedef TierRow = ({int count, int images, double fee});
+/// 流水的一页(`GET /api/wallet/ledger`),新→旧。
+class WalletLedger {
+  const WalletLedger({this.items = const [], this.nextCursor});
 
-/// 计费报告(`/api/billing/estimate` 与 `/api/billing/settlement` 同结构,
-/// 均出自服务端 `_compute_billing`;后者多支付状态)。
-class BillingReport {
-  const BillingReport({
-    this.me,
-    this.periodLabel = '',
-    this.freeThreshold = 0,
-    this.v5FreeThreshold = 0,
-    this.t1 = 0,
-    this.t2 = 0,
-    this.distribution = const {},
-    this.activeUsers = 0,
-    this.earlyMode = false,
-    this.paymentStatus = '',
-    this.beforeStartFrom = false,
-    this.billingStartFrom = '',
-  });
+  final List<WalletEntry> items;
 
-  final BillingParty? me;
+  /// 下一页游标,原样传回去续翻;null = 到底了。
+  final String? nextCursor;
 
-  /// 周期标签,形如 `07/23 - 08/23`。
-  final String periodLabel;
-
-  /// 免费线(张);[t1]/[t2] 为付费用户内 P50/P80 分界(0 = 人太少走均摊)。
-  final int freeThreshold;
-
-  /// V5 的免费容差(张)。和 [freeThreshold] 是**两条各算各的**线:
-  /// V4.5 及更早看自己那条,V5 看这条,两条都不超才算免费档。
-  /// 这条是「防误触」不是「送额度」—— 点错一两张不该把人划进付费档,但真拿
-  /// V5 当主力用就得进付费池,且超了以后 V5 张数一张都不免。
-  final int v5FreeThreshold;
-
-  final int t1;
-  final int t2;
-
-  /// 阶梯名(免费/一阶/二阶/三阶/均摊)→ 分布。
-  final Map<String, TierRow> distribution;
-  final int activeUsers;
-
-  /// 预估专属:周期早期样本不足。
-  final bool earlyMode;
-
-  /// 结算专属:`paid` | `unpaid` | `free`。
-  final String paymentStatus;
-
-  /// 该周期整个早于新计费规则的生效日([billingStartFrom])—— 那段消费在旧规则
-  /// 下早就结清了,不重复出账。为真时服务端连明细都不下发,界面要**整块换成
-  /// 空态**而不是把金额显示成 ¥0:后者会连着阶梯表一起画出来(「免费 0 人 /
-  /// 一阶 0 人 … 总计 ¥0」),看着像「这期大家都没用」。
-  final bool beforeStartFrom;
-
-  /// 新规则生效日,`yyyy-MM-dd`。
-  final String billingStartFrom;
-
-  /// 结算日(每月几号)。服务端不单独下发,从 [periodLabel] 的收尾日期里取 ——
-  /// 那个分界日改过一次(27 → 23),写死的话下次再改又得回来改一遍。
-  /// 解析不出就回落到 23(当前配置)。
-  int get cycleDay {
-    final m = RegExp(r'(\d{1,2})\s*$').firstMatch(periodLabel);
-    return int.tryParse(m?.group(1) ?? '') ?? 23;
-  }
-
-  /// 该阶梯的张数区间文案(对齐 web);均摊态没有区间。
-  String rangeOf(String tier) => switch (tier) {
-    // 免费档现在是**两条线同时满足**。只写「≤200 张」的话,超了 V5 容差却没
-    // 超 200 的人完全看不懂自己为什么在付费档。
-    '免费' =>
-      v5FreeThreshold > 0
-          ? '≤$freeThreshold·V5≤$v5FreeThreshold'
-          : '≤$freeThreshold 张',
-    '一阶' => t1 > 0 ? '${freeThreshold + 1}~$t1 张' : '—',
-    '二阶' => t2 > 0 ? '${(t1 == 0 ? freeThreshold : t1) + 1}~$t2 张' : '—',
-    '三阶' => t2 > 0 ? '>$t2 张' : '—',
-    _ => '>$freeThreshold 张',
-  };
-
-  /// 人均费用;无样本返回 null。
-  double? avgFeeOf(String tier) {
-    final r = distribution[tier];
-    if (r == null || r.count == 0) return null;
-    return r.fee / r.count;
-  }
-
-  factory BillingReport.fromJson(Map<String, dynamic> j) {
-    final tiers = j['tiers'];
-    final dist = j['tier_distribution'];
-    return BillingReport(
-      me: j['current_user'] is Map<String, dynamic>
-          ? BillingParty.fromJson(j['current_user'] as Map<String, dynamic>)
-          : null,
-      periodLabel: j['billing_month']?.toString() ?? '',
-      freeThreshold:
-          (tiers is Map ? (tiers['free'] as num?)?.toInt() : null) ??
-          (j['free_threshold'] as num?)?.toInt() ??
-          0,
-      v5FreeThreshold:
-          (tiers is Map ? (tiers['v5_free'] as num?)?.toInt() : null) ??
-          (j['v5_free_threshold'] as num?)?.toInt() ??
-          0,
-      t1: tiers is Map ? ((tiers['t1'] as num?)?.toInt() ?? 0) : 0,
-      t2: tiers is Map ? ((tiers['t2'] as num?)?.toInt() ?? 0) : 0,
-      distribution: {
-        if (dist is Map)
-          for (final e in dist.entries)
-            if (e.value is Map)
-              e.key.toString(): (
-                count: ((e.value as Map)['count'] as num?)?.toInt() ?? 0,
-                images:
-                    ((e.value as Map)['total_images'] as num?)?.toInt() ?? 0,
-                fee: ((e.value as Map)['total_fee'] as num?)?.toDouble() ?? 0,
-              ),
-      },
-      activeUsers: (j['active_user_count'] as num?)?.toInt() ?? 0,
-      earlyMode: j['estimate_mode'] == 'early',
-      paymentStatus: j['payment_status']?.toString() ?? '',
-      beforeStartFrom: j['before_start_from'] == true,
-      billingStartFrom: j['billing_start_from']?.toString() ?? '',
+  factory WalletLedger.fromJson(Map<String, dynamic> j) {
+    final next = j['next_cursor']?.toString() ?? '';
+    return WalletLedger(
+      items: [
+        for (final e in (j['items'] as List?) ?? const [])
+          if (e is Map) WalletEntry.fromJson(e.cast<String, dynamic>()),
+      ],
+      nextCursor: next.isEmpty ? null : next,
     );
   }
+}
+
+/// 一把 API 密钥(`/api/user/api-keys`)。用户在自己的 NovelAI 客户端里把地址换成
+/// [ApiKeyList.baseUrl]、令牌换成这把密钥,就能拿 Bot 账户出图,费用从钱包扣。
+/// 列表里只有前缀:完整密钥只在新建那一刻回一次([CreatedApiKey])。
+class ApiKeyInfo {
+  const ApiKeyInfo({
+    required this.id,
+    this.name = '',
+    this.prefix = '',
+    this.createdAt = '',
+    this.lastUsedAt,
+  });
+
+  final int id;
+  final String name;
+
+  /// `pk-` 加 8 位,认得出是哪一把就够了。
+  final String prefix;
+
+  /// 北京时间 naive ISO(`2026-11-02T19:04:11`)。
+  final String createdAt;
+
+  /// 最后用过的时间;没用过为 null。服务端每把最多 5 分钟落一次库。
+  final String? lastUsedAt;
+
+  /// `YYYY-MM-DD HH:mm`。服务端给的就是北京时间,按位切出来原样显示。
+  static String shortTime(String ts) =>
+      ts.length >= 16 ? ts.substring(0, 16).replaceFirst('T', ' ') : ts;
+
+  factory ApiKeyInfo.fromJson(Map<String, dynamic> j) {
+    final last = j['last_used_at']?.toString() ?? '';
+    return ApiKeyInfo(
+      id: (j['id'] as num?)?.toInt() ?? 0,
+      name: j['name']?.toString() ?? '',
+      prefix: j['prefix']?.toString() ?? '',
+      createdAt: j['created_at']?.toString() ?? '',
+      lastUsedAt: last.isEmpty ? null : last,
+    );
+  }
+}
+
+/// 我的 API 密钥(`GET /api/user/api-keys`):没撤销的,新的在前。
+class ApiKeyList {
+  const ApiKeyList({this.keys = const [], this.max = 3, this.baseUrl = ''});
+
+  final List<ApiKeyInfo> keys;
+
+  /// 每人最多几把。
+  final int max;
+
+  /// 客户端里要填的 API 地址(`https://nai.sora214.top`)。
+  final String baseUrl;
+
+  bool get full => keys.length >= max;
+
+  factory ApiKeyList.fromJson(Map<String, dynamic> j) => ApiKeyList(
+    keys: [
+      for (final e in (j['keys'] as List?) ?? const [])
+        if (e is Map) ApiKeyInfo.fromJson(e.cast<String, dynamic>()),
+    ],
+    max: (j['max'] as num?)?.toInt() ?? 3,
+    baseUrl: j['base_url']?.toString() ?? '',
+  );
+}
+
+/// 新建的那一把:比列表项多一个完整密钥 [key],**只回这一次**。
+class CreatedApiKey {
+  const CreatedApiKey({
+    required this.info,
+    required this.key,
+    this.baseUrl = '',
+  });
+
+  final ApiKeyInfo info;
+  final String key;
+  final String baseUrl;
+
+  factory CreatedApiKey.fromJson(Map<String, dynamic> j) => CreatedApiKey(
+    info: ApiKeyInfo.fromJson(j),
+    key: j['key']?.toString() ?? '',
+    baseUrl: j['base_url']?.toString() ?? '',
+  );
 }
 
 /// 一笔点数消耗(`points_spent` 行)。[reason] 由服务端拼装,
@@ -684,257 +790,6 @@ class CallRecord {
     img2img: j['i2i'] == true,
     charRefs: (j['pr'] as num?)?.toInt() ?? 0,
   );
-}
-
-/// 某窗口内的消耗明细(`/api/billing/user/details`,窗口可指定到某一天)。
-class UsageDetails {
-  const UsageDetails({
-    this.records = const [],
-    this.breakdown = const [],
-    this.imageCalls = 0,
-    this.points = 0,
-    this.v5Calls = 0,
-    this.v5Points = 0,
-    this.localCalls = 0,
-  });
-
-  /// 逐笔消耗,新→旧(服务端上限 50 条)。
-  final List<PointRecord> records;
-
-  /// 按 reason 归并 (原因, 点数, 笔数),另带该组里 V5 占的点数/笔数。
-  /// 不按模型拆组 —— reason 里已经写了尺寸步数,再按模型拆会把同一类消耗切成两行。
-  final List<
-    ({String reason, int points, int count, int v5Points, int v5Count})
-  >
-  breakdown;
-
-  /// **全部**出图(含自建后端),与个人中心那个「生图次数」磁贴同口径。
-  final int imageCalls;
-  final int points;
-
-  /// 其中的 V5 张数与点数。V5 扣点是 V4.5 的 1.5 倍,张数看不出真实消耗。
-  final int v5Calls;
-  final int v5Points;
-
-  /// anima / krea 等自建后端张数 —— 计在 [imageCalls] 里,但**不进 NAI 分摊**。
-  final int localCalls;
-}
-
-/// 一条算力消费。**出图租卡和生成视频合在一条时间线上** —— 它们是同一类账目
-/// (按次实付、直计不分摊);生图那笔是订阅制月盘子按用量分摊,性质不同,
-/// 在 NAI 账单那一页。
-class GpuBillItem {
-  const GpuBillItem({
-    required this.kind,
-    required this.time,
-    required this.cost,
-    required this.seconds,
-    this.minutes = 0,
-    this.jobsDone = 0,
-    this.jobsFailed = 0,
-    this.reason = '',
-    this.preset = '',
-    this.mode = '',
-  });
-
-  /// `rental` 出图租卡 / `video` 生成视频。
-  final String kind;
-
-  /// ISO 时间串,服务端原样给的。
-  final String time;
-
-  /// 元。
-  final double cost;
-
-  /// rental = 租用秒数;video = 成片时长。
-  final int seconds;
-
-  // —— kind == 'rental' ——
-  final double minutes;
-  final int jobsDone;
-  final int jobsFailed;
-
-  /// 关机原因(用户主动 / 空闲超时 / 超过硬上限 / 失联)。
-  final String reason;
-
-  // —— kind == 'video' ——
-  final String preset;
-  final String mode;
-
-  bool get isRental => kind == 'rental';
-
-  factory GpuBillItem.fromJson(Map<String, dynamic> j) => GpuBillItem(
-    kind: j['kind']?.toString() ?? '',
-    time: j['time']?.toString() ?? '',
-    cost: (j['cost'] as num?)?.toDouble() ?? 0,
-    seconds: (j['seconds'] as num?)?.toInt() ?? 0,
-    minutes: (j['minutes'] as num?)?.toDouble() ?? 0,
-    jobsDone: (j['jobs_done'] as num?)?.toInt() ?? 0,
-    jobsFailed: (j['jobs_failed'] as num?)?.toInt() ?? 0,
-    reason: j['reason']?.toString() ?? '',
-    preset: j['preset']?.toString() ?? '',
-    mode: j['mode']?.toString() ?? '',
-  );
-}
-
-/// 还在跑、**还没结算**的那一台。合计里已经算进去了(用户看的是「到现在为止
-/// 花了多少」,不是「已结算多少」),所以界面上要把它单独标出来 —— 它的数还在涨。
-class GpuBillRunning {
-  const GpuBillRunning({this.seconds = 0, this.jobsDone = 0, this.cost = 0});
-
-  final int seconds;
-  final int jobsDone;
-  final double cost;
-
-  factory GpuBillRunning.fromJson(Map<String, dynamic> j) => GpuBillRunning(
-    seconds: (j['seconds'] as num?)?.toInt() ?? 0,
-    jobsDone: (j['jobs_done'] as num?)?.toInt() ?? 0,
-    cost: (j['cost'] as num?)?.toDouble() ?? 0,
-  );
-}
-
-/// 上期算力账单:管理员结算那一刻定死的快照,**只含自己那份**。
-///
-/// 这是实际要付的钱,所以服务端读的是结算行里存下的数、不回头重算 ——
-/// 补录、改价、误删任何一样都会让界面上的数和已经收过的钱对不上。
-///
-/// 上期一分没花的人不下发这块(为从没用过算力的人摆一张 ¥0.00 只是噪音)。
-class GpuLastPeriod {
-  const GpuLastPeriod({
-    this.label = '',
-    this.cost = 0,
-    this.rentalCost = 0,
-    this.rentalCount = 0,
-    this.rentalHours = 0,
-    this.videoCost = 0,
-    this.videoCount = 0,
-    this.videoSeconds = 0,
-  });
-
-  /// 跨度,形如 `7/25 09:30 - 8/23 10:56`。
-  final String label;
-  final double cost;
-
-  final double rentalCost;
-  final int rentalCount;
-  final double rentalHours;
-
-  final double videoCost;
-  final int videoCount;
-  final int videoSeconds;
-
-  factory GpuLastPeriod.fromJson(Map<String, dynamic> j) {
-    Map<String, dynamic> sub(String k) =>
-        (j[k] as Map?)?.cast<String, dynamic>() ?? const {};
-    final r = sub('rental');
-    final v = sub('video');
-    return GpuLastPeriod(
-      label: j['label']?.toString() ?? '',
-      cost: (j['cost'] as num?)?.toDouble() ?? 0,
-      rentalCost: (r['cost'] as num?)?.toDouble() ?? 0,
-      rentalCount: (r['count'] as num?)?.toInt() ?? 0,
-      rentalHours: (r['hours'] as num?)?.toDouble() ?? 0,
-      videoCost: (v['cost'] as num?)?.toDouble() ?? 0,
-      videoCount: (v['count'] as num?)?.toInt() ?? 0,
-      videoSeconds: (v['seconds'] as num?)?.toInt() ?? 0,
-    );
-  }
-}
-
-/// 算力账单(`GET /api/rental/bills`)。
-///
-/// ⚠ 服务端**只下发售价**,机时成本/毛利根本不在返回里 —— 别去别处拼一个出来。
-class GpuBills {
-  const GpuBills({
-    this.ok = false,
-    this.items = const [],
-    this.running,
-    this.periodLabel = '',
-    this.settled = false,
-    this.lastPeriod,
-    this.totalCost = 0,
-    this.rentalCost = 0,
-    this.rentalHours = 0,
-    this.rentalJobs = 0,
-    this.rentalCount = 0,
-    this.videoCost = 0,
-    this.videoSeconds = 0,
-    this.videoCount = 0,
-    this.ratePerHour = 0,
-    this.message = '',
-  });
-
-  final bool ok;
-
-  /// 逐笔,新→旧。两张表各取最近 N 条后按时间归并再砍回 N。
-  final List<GpuBillItem> items;
-  final GpuBillRunning? running;
-
-  /// 上面那些数的**口径**:管理员在 bot 里结一次账就划一期。
-  /// [settled] = 已经结过账(那时这些数只算这一期,[periodLabel] 形如
-  /// `8/23 10:56 结算后`);没结过账时口径仍是全部历史,界面照旧说「累计」。
-  final String periodLabel;
-  final bool settled;
-
-  /// 上期账单快照,见 [GpuLastPeriod]。没结过账 / 上期没花钱时为 null。
-  final GpuLastPeriod? lastPeriod;
-
-  /// 租卡 + 视频之和(本期,见 [settled])。
-  final double totalCost;
-
-  final double rentalCost;
-  final double rentalHours;
-  final int rentalJobs;
-  final int rentalCount;
-
-  final double videoCost;
-  final int videoSeconds;
-  final int videoCount;
-
-  final double ratePerHour;
-  final String message;
-
-  /// **本期**一分钱都还没花过。刚结完账正是这个状态,那时 [lastPeriod] 还在,
-  /// 界面要照样把上期那张卡摆出来 —— 不然用户会以为自己的消费记录凭空没了,
-  /// 而那笔钱恰恰是现在要付的。
-  bool get isEmpty => items.isEmpty && running == null;
-
-  factory GpuBills.fromJson(Map<String, dynamic> j) {
-    Map<String, dynamic> sub(String k) =>
-        (j[k] as Map?)?.cast<String, dynamic>() ?? const {};
-    final r = sub('rental');
-    final v = sub('video');
-    final run = j['running'];
-    final period = sub('period');
-    final last = j['last_period'];
-    return GpuBills(
-      ok: j['ok'] == true,
-      items: [
-        for (final e in (j['items'] as List?) ?? const [])
-          if (e is Map) GpuBillItem.fromJson(e.cast<String, dynamic>()),
-      ],
-      running: run is Map
-          ? GpuBillRunning.fromJson(run.cast<String, dynamic>())
-          : null,
-      // since 为空 = 还没结过账 → 口径是全部历史(老服务端没有 period 块,
-      // 落在同一条路径上,行为不变)
-      settled: (period['since']?.toString() ?? '').isNotEmpty,
-      periodLabel: period['label']?.toString() ?? '',
-      lastPeriod: last is Map
-          ? GpuLastPeriod.fromJson(last.cast<String, dynamic>())
-          : null,
-      totalCost: (j['total_cost'] as num?)?.toDouble() ?? 0,
-      rentalCost: (r['cost'] as num?)?.toDouble() ?? 0,
-      rentalHours: (r['hours'] as num?)?.toDouble() ?? 0,
-      rentalJobs: (r['jobs'] as num?)?.toInt() ?? 0,
-      rentalCount: (r['count'] as num?)?.toInt() ?? 0,
-      videoCost: (v['cost'] as num?)?.toDouble() ?? 0,
-      videoSeconds: (v['seconds'] as num?)?.toInt() ?? 0,
-      videoCount: (v['count'] as num?)?.toInt() ?? 0,
-      ratePerHour: (j['rate_per_hour'] as num?)?.toDouble() ?? 0,
-      message: j['message']?.toString() ?? '',
-    );
-  }
 }
 
 /// 机房已装 LoRA 卡片(`GET /api/lora/list`;anima 出图渠道专用)。
@@ -1202,139 +1057,6 @@ class CivitaiLoraInfo {
   );
 }
 
-/// 一次自然语言补强的产出(`POST /api/agent/web/anima-nl`)。
-/// [text] 是要追加到正向词末尾的一整段英文(服务端已压平换行、剥掉引号/列表号,
-/// 并清掉会破坏提示词结构的 `<<` `>>` `~`);[noteZh] 只给用户看,不进提示词。
-class AnimaNlResult {
-  const AnimaNlResult({this.text = '', this.noteZh = ''});
-
-  final String text;
-  final String noteZh;
-
-  Map<String, dynamic> toJson() => {'text': text, 'note_zh': noteZh};
-
-  factory AnimaNlResult.fromJson(Map<String, dynamic> j) => AnimaNlResult(
-    text: j['text']?.toString().trim() ?? '',
-    noteZh: j['note_zh']?.toString().trim() ?? '',
-  );
-}
-
-/// 一次提示词整理的产出(`POST /api/agent/web/krea-prompt`)。
-///
-/// ⚠ 与 [AnimaNlResult] 形状相同、语义相反,别混用:
-///   anima  tag 是骨架、句子是补充 → [AnimaNlResult.text] **追加**到正向词末尾
-///   krea   整条 prompt 就是一段自然语言 → 这里的 [text] 是**整条新的正向词**,
-///          整段替换原文(追加只会得到两段互相打架的描述)
-/// [noteZh] 只给用户看,不进提示词。
-class KreaPromptResult {
-  const KreaPromptResult({this.text = '', this.noteZh = ''});
-
-  final String text;
-  final String noteZh;
-
-  Map<String, dynamic> toJson() => {'text': text, 'note_zh': noteZh};
-
-  factory KreaPromptResult.fromJson(Map<String, dynamic> j) => KreaPromptResult(
-    text: j['text']?.toString().trim() ?? '',
-    noteZh: j['note_zh']?.toString().trim() ?? '',
-  );
-}
-
-/// AI 助手产出的一个分角色分区(`characters[i]`)。
-///
-/// [position] 是站位坐标串 `"x,y"`(两个 0~1 四位小数,**y 向下增大**),与
-/// `CharacterPrompt.position` 同格式,不用换算。**空串 = AI 没指定**,不是
-/// 「放正中」—— 写回时要继承同位旧角色的站位,否则「让她笑一下」这种无关改动
-/// 都会把用户摆好的构图重排掉。
-class AgentCharacter {
-  const AgentCharacter({
-    required this.name,
-    required this.positive,
-    this.negative = '',
-    this.position = '',
-  });
-
-  final String name;
-  final String positive;
-  final String negative;
-  final String position;
-
-  Map<String, dynamic> toJson() => {
-    'name': name,
-    'positive': positive,
-    'negative': negative,
-    'position': position,
-  };
-
-  factory AgentCharacter.fromJson(Map<String, dynamic> j) => AgentCharacter(
-    name: j['name']?.toString() ?? '',
-    positive: j['positive']?.toString() ?? '',
-    negative: j['negative']?.toString() ?? '',
-    position: j['position']?.toString() ?? '',
-  );
-}
-
-/// AI 助手一轮的终态产出(`POST /api/agent/web/generate-prompt` 的 `final` 事件)。
-///
-/// ⚠ 字段名对不上,别照抄后端:后端那个 `thinking` 装的**不是**模型思考,而是发给
-/// 用户的正文回复(见服务端 `router._chat_output_to_agent_result`);真正的原生思考
-/// 在 `reasoning`。这里把它正名为 [replyText],省得下游每次都要重新踩一遍。
-///
-/// **这条链路没有 `should_draw`** —— 服务端转成本结构时把它连同 `size` 一起丢了。
-/// 所以「这一轮到底改没改画面」只能自己判:没有绘图意图时服务端把 positive /
-/// negative / characters 全留空,故 [hasDraw] 即判据。纯聊天轮据此不写创作页、
-/// 不出结果卡、不点导航角标。
-class AgentResult {
-  const AgentResult({
-    this.replyText = '',
-    this.reasoning = '',
-    this.positive = '',
-    this.negative = '',
-    this.characters = const [],
-    this.resources = const {},
-  });
-
-  /// 发给用户的角色语气正文(后端字段名是 `thinking`)。
-  final String replyText;
-
-  /// 模型原生思考。不进对话历史,只供当轮展示/排查。
-  final String reasoning;
-
-  final String positive;
-  final String negative;
-  final List<AgentCharacter> characters;
-
-  /// 沿用中的资源账本(画师串 / OC):`{kind: {名字: 内容}}`。
-  ///
-  /// 服务端记这本账、按「还在不在这幅画里」筛,但**不存**它 —— 这条链路没有
-  /// 服务端会话。所以账本随结果回来,下一轮原样发回去。
-  ///
-  /// 它解决的是:预匹配逐条消息做,用户这轮没再提「A1」,`[画师串]` 块就不出现,
-  /// 画风的出处断在那儿 —— 下一句「换个姿势」模型就不知道该保留哪串了。
-  final Map<String, Map<String, String>> resources;
-
-  /// 这一轮有没有产出画面改动。见类文档:服务端不下发 `should_draw`。
-  bool get hasDraw => positive.trim().isNotEmpty || characters.isNotEmpty;
-
-  factory AgentResult.fromJson(Map<String, dynamic> j) => AgentResult(
-    replyText: j['thinking']?.toString().trim() ?? '',
-    reasoning: j['reasoning']?.toString().trim() ?? '',
-    positive: j['positive']?.toString() ?? '',
-    negative: j['negative']?.toString() ?? '',
-    characters: [
-      for (final c in (j['characters'] as List? ?? const []))
-        if (c is Map<String, dynamic>) AgentCharacter.fromJson(c),
-    ],
-    resources: {
-      for (final e in (j['resources'] as Map? ?? const {}).entries)
-        if (e.value is Map)
-          '${e.key}': {
-            for (final r in (e.value as Map).entries) '${r.key}': '${r.value}',
-          },
-    },
-  );
-}
-
 /// Plana 后端客户端(当前仅含 bot 授权四端点里 App 要用的三个;
 /// verify 由 Bot 侧调用,App 不实现)。端点契约由后端项目定义,不在本仓库内。
 ///
@@ -1345,6 +1067,9 @@ class BackendClient {
 
   /// 形如 `http://host:8765`,末尾无斜杠。
   final String baseUrl;
+
+  /// 首次请求时取定,见 [backendHttpClient]。
+  late final http.Client _http = backendHttpClient();
 
   static const _timeout = Duration(seconds: 15);
 
@@ -1419,8 +1144,78 @@ class BackendClient {
       logi('[net] POST $path body=${payload.length >> 10}KB');
     }
     return _handle(
-      () => http.post(_u(path), headers: _headers(bearer), body: payload),
+      () => _http.post(_u(path), headers: _headers(bearer), body: payload),
       timeout: _sendTimeout(payload.length, timeout),
+    );
+  }
+
+  /// 没有分片提交入口的后端(旧版),之后直接走 JSON。
+  static final _noMultipart = <String>{};
+
+  static final _b64 = RegExp(r'^[A-Za-z0-9+/]+={0,2}$');
+
+  /// 把 [v] 里的长 base64 串(图片、Vibe 编码)抽进 [parts],原处换成 `@part:名字`。
+  /// 只抽解码再编码逐字一致的串,服务端换回 base64 后和原来一模一样;同一串只抽一份。
+  static Object? _extractParts(
+    Object? v,
+    Map<String, Uint8List> parts,
+    Map<String, String> seen,
+  ) {
+    if (v is String) {
+      if (v.length < 1024 || v.length % 4 != 0 || !_b64.hasMatch(v)) return v;
+      final hit = seen[v];
+      if (hit != null) return '@part:$hit';
+      final bytes = base64Decode(v);
+      if (base64Encode(bytes) != v) return v;
+      final name = 'p${parts.length}';
+      parts[name] = bytes;
+      seen[v] = name;
+      return '@part:$name';
+    }
+    if (v is Map) {
+      return <String, dynamic>{
+        for (final e in v.entries)
+          '${e.key}': _extractParts(e.value, parts, seen),
+      };
+    }
+    if (v is List) return [for (final x in v) _extractParts(x, parts, seen)];
+    return v;
+  }
+
+  Future<Map<String, dynamic>> _postMultipart(
+    String path,
+    Map<String, dynamic> body,
+    Map<String, Uint8List> parts,
+    String? bearer,
+  ) {
+    final req = http.MultipartRequest('POST', _u(path));
+    if (bearer != null) req.headers['Authorization'] = 'Bearer $bearer';
+    var size = 0;
+    parts.forEach((name, bytes) {
+      size += bytes.length;
+      req.files.add(
+        http.MultipartFile.fromBytes(
+          name,
+          bytes,
+          filename: 'blob',
+          contentType: http.MediaType('image', 'png'),
+        ),
+      );
+    });
+    final json = utf8.encode(jsonEncode(body));
+    size += json.length;
+    req.files.add(
+      http.MultipartFile.fromBytes(
+        'request',
+        json,
+        filename: 'blob',
+        contentType: http.MediaType('application', 'json'),
+      ),
+    );
+    if (size > 512 * 1024) logi('[net] POST $path multipart=${size >> 10}KB');
+    return _handle(
+      () async => http.Response.fromStream(await _http.send(req)),
+      timeout: _sendTimeout(size, null),
     );
   }
 
@@ -1429,7 +1224,7 @@ class BackendClient {
     String? bearer,
     Duration? timeout,
   ]) => _handle(
-    () => http.get(_u(path), headers: _headers(bearer)),
+    () => _http.get(_u(path), headers: _headers(bearer)),
     timeout: timeout,
   );
 
@@ -1441,7 +1236,7 @@ class BackendClient {
   ]) {
     final payload = jsonEncode(body ?? const <String, dynamic>{});
     return _handle(
-      () => http.put(_u(path), headers: _headers(bearer), body: payload),
+      () => _http.put(_u(path), headers: _headers(bearer), body: payload),
       timeout: _sendTimeout(payload.length, timeout),
     );
   }
@@ -1479,16 +1274,56 @@ class BackendClient {
   /// 提交 bot 模式生成任务(登录:Bearer 头 + body 里 session_id)。
   /// → (是否受理, task_id?, 文案)。⚠️ 入队失败也返 200 success:false。
   /// 重绘/参考图会往 params 里塞几 MB base64,超时交 [_sendTimeout] 按体积放宽。
+  ///
+  /// 带 [clientRequestId](幂等键)时,连接层出错(没拿到响应)自动重发一次:服务端
+  /// 按键去重,第一次其实已受理也只回同一个 task_id,不会建第二单。
+  ///
+  /// 带图(重绘 / 图生图 / 参考图)时走 `/bot/generate/multipart`,图片作二进制分片,
+  /// 比 base64 少传三分之一。后端没有这个入口(404 / 405)就退回 JSON,并记住这台后端。
   Future<({bool success, String? taskId, String message})> botGenerate({
     required String sessionId,
     required Map<String, dynamic> params,
     String imageBackend = 'novelai',
+    String? clientRequestId,
   }) async {
-    final j = await _postJson('/bot/generate', {
+    final body = {
       'session_id': sessionId,
       'params': params,
       'image_backend': imageBackend,
-    }, sessionId);
+      'client_request_id': ?clientRequestId,
+      // NAI 成图原样(无损 WebP)发过来,streamBotTask 里还原成 PNG;旧后端忽略这个字段
+      'result_format': 'webp',
+    };
+    Future<Map<String, dynamic>> submit() async {
+      if (!_noMultipart.contains(baseUrl)) {
+        final parts = <String, Uint8List>{};
+        final mpBody = _extractParts(body, parts, {}) as Map<String, dynamic>;
+        if (parts.isNotEmpty) {
+          try {
+            return await _postMultipart(
+              '/bot/generate/multipart',
+              mpBody,
+              parts,
+              sessionId,
+            );
+          } on BackendException catch (e) {
+            if (e.status != 404 && e.status != 405) rethrow;
+            _noMultipart.add(baseUrl);
+            logi('[net] 后端没有分片提交入口,改回 JSON');
+          }
+        }
+      }
+      return _postJson('/bot/generate', body, sessionId);
+    }
+
+    Map<String, dynamic> j;
+    try {
+      j = await submit();
+    } on BackendException catch (e) {
+      if (clientRequestId == null || e.status != null) rethrow;
+      logi('[net] 提交出图没拿到响应,带同一个幂等键重发: ${e.message}');
+      j = await submit();
+    }
     return (
       success: j['success'] == true,
       taskId: j['task_id'] as String?,
@@ -1514,7 +1349,7 @@ class BackendClient {
     if (baseUrl.isEmpty) throw BackendException('未配置后端地址');
     final http.Response resp;
     try {
-      resp = await http
+      resp = await _http
           .get(Uri.parse('$baseUrl$url'))
           .timeout(const Duration(seconds: 60));
     } on TimeoutException {
@@ -1549,7 +1384,7 @@ class BackendClient {
         // 2026-09-04 起这个端点要鉴权（此前完全敞着，知道 task_id 就能撤别人的任务）。
         // 不带会话会 401 —— 而 401 在这里被当成「没取消成」吞掉，表现是「点了取消
         // 但服务端照常出图」，很难查。所以调用方务必把 sessionId 传进来。
-        () => http.delete(_u('/task/$taskId'), headers: _headers(sessionId)),
+        () => _http.delete(_u('/task/$taskId'), headers: _headers(sessionId)),
       );
       return j['success'] == true;
     } catch (_) {
@@ -1599,12 +1434,26 @@ class BackendClient {
   Future<NaiUsage?> poolUsage() async =>
       parseNaiUsage((await _getJson('/usage'))['usage']);
 
+  /// NovelAI 官方服务状态(`GET /api/nai-status`,公开端点),解析见 `parseNaiStatus`。
+  Future<Map<String, dynamic>> getNaiStatus() => _getJson('/nai-status');
+
   /// 我的 NAI 5 出图额度(`GET /api/user/quota`)。按会话鉴权,**只能查自己**
   /// (user_id 取自会话,传不进去别人的)。
   ///
   /// 与上面那块 `usage` 的关系见 [NaiQuota]:两道闸都过了才真正出图。
   Future<NaiQuota> myNaiQuota(String sessionId) async =>
       NaiQuota.fromJson(await _getJson('/user/quota', sessionId));
+
+  /// 拨自己的「中转出图」开关。回执:`enabled` 现在的状态、`available` 渠道能不能用。
+  Future<({bool enabled, bool available})> setMyRelay(
+    String sessionId,
+    bool enabled,
+  ) async {
+    final j = await _postJson('/user/quota/relay', {
+      'enabled': enabled,
+    }, sessionId);
+    return (enabled: j['enabled'] == true, available: j['available'] != false);
+  }
 
   // ── 出图租卡(anima / krea2 付费档)──────────────────────────────
   // 服务端 `agent_router/img_rental.py`。四个端点都要 Bot 会话。
@@ -1668,12 +1517,6 @@ class BackendClient {
     int idleTimeout,
   ) => _postJson('/rental/idle', {'idle_timeout': idleTimeout}, sessionId);
 
-  /// 算力账单(`GET /api/rental/bills`)。租卡 + 视频合成一条时间线。
-  Future<GpuBills> rentalBills(String sessionId, {int limit = 50}) async =>
-      GpuBills.fromJson(
-        await _getJson('/rental/bills?limit=$limit', sessionId),
-      );
-
   // ── 公共 Vibe 库 ──────────────────────────────────────────────
 
   /// 缩略图端点绝对 URL(公开,`<img>`/RemoteImage 直接引用)。
@@ -1725,7 +1568,7 @@ class BackendClient {
     final uri = _u('/vibes/file/${Uri.encodeComponent(filename)}');
     final http.Response resp;
     try {
-      resp = await http
+      resp = await _http
           .get(uri, headers: _headers(sessionId))
           .timeout(const Duration(seconds: 30));
     } on TimeoutException {
@@ -1907,7 +1750,7 @@ class BackendClient {
 
   Future<void> deletePublicOc(String sessionId, String enName) async {
     await _handle(
-      () => http.delete(
+      () => _http.delete(
         _u('/oc/${Uri.encodeComponent(enName)}'),
         headers: _headers(sessionId),
       ),
@@ -1984,7 +1827,7 @@ class BackendClient {
 
   Future<void> deletePublicArtist(String sessionId, String id) async {
     await _handle(
-      () => http.delete(
+      () => _http.delete(
         _u('/artists/${Uri.encodeComponent(id)}'),
         headers: _headers(sessionId),
       ),
@@ -2004,9 +1847,17 @@ class BackendClient {
 
   /// 拉取个人 Tag 云备份(登录:Bearer 头)。web 端备份可能内嵌 base64
   /// 预览,体积达数十 MB,超时放宽到 60s。
-  /// → (四类条目原始 JSON, 更新时间秒, 各类计数)。从未备份过时四类为空数组。
+  /// → (四类条目原始 JSON, 自定义类别块, 标签池, 法典收藏, 更新时间秒, 各类计数)。
+  /// 从未备份过时四类为空数组;没存过的块为 null。
   Future<
-    ({Map<String, dynamic> categories, int updatedAt, Map<String, int> counts})
+    ({
+      Map<String, dynamic> categories,
+      Map<String, dynamic>? custom,
+      Map<String, dynamic>? pools,
+      List<dynamic>? codexFavorites,
+      int updatedAt,
+      Map<String, int> counts,
+    })
   >
   getTagBackup(String sessionId) async {
     final j = await _getJson(
@@ -2019,6 +1870,15 @@ class BackendClient {
       categories: j['categories'] is Map<String, dynamic>
           ? j['categories'] as Map<String, dynamic>
           : const <String, dynamic>{},
+      custom: j['custom'] is Map<String, dynamic>
+          ? j['custom'] as Map<String, dynamic>
+          : null,
+      pools: j['pools'] is Map<String, dynamic>
+          ? j['pools'] as Map<String, dynamic>
+          : null,
+      codexFavorites: j['codex_favorites'] is List
+          ? j['codex_favorites'] as List
+          : null,
       updatedAt: (j['updated_at'] as num?)?.toInt() ?? 0,
       counts: {
         if (rawCounts is Map)
@@ -2048,17 +1908,90 @@ class BackendClient {
     } catch (_) {}
   }
 
-  /// 上传个人 Tag 云备份(整体覆盖;⚠️ 该端点鉴权走 body 里的 session_id)。
+  /// 上传个人 Tag 云备份(四类、自定义类别、标签池、法典收藏整体覆盖;⚠️ 该端点
+  /// 鉴权走 body 里的 session_id)。
   Future<void> uploadTagBackup({
     required String sessionId,
     required Map<String, List<Map<String, dynamic>>> categories,
+    required Map<String, dynamic> custom,
+    required Map<String, List<String>> pools,
+    required List<Map<String, dynamic>> codexFavorites,
   }) async {
     await _postJson(
       '/user-tag-backup',
-      {'session_id': sessionId, 'categories': categories},
+      {
+        'session_id': sessionId,
+        'categories': categories,
+        'custom': custom,
+        'pools': pools,
+        'codex_favorites': codexFavorites,
+      },
       sessionId,
       const Duration(seconds: 30),
     );
+  }
+
+  /// 灵感库预览图上传前核对 → (要上传的哈希, 已用字节, 额度字节)。
+  /// 别人传过的同一张后端直接记到本人名下,不在 missing 里。
+  Future<({List<String> missing, int used, int quota})> checkTagPreviews(
+    String sessionId,
+    List<String> shas,
+  ) async {
+    final j = await _postJson('/user-tag-previews/check', {
+      'shas': shas,
+    }, sessionId);
+    return (
+      missing: [
+        for (final s
+            in (j['missing'] is List ? j['missing'] as List : const []))
+          if (s is String) s,
+      ],
+      used: (j['used'] as num?)?.toInt() ?? 0,
+      quota: (j['quota'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// 上传一张灵感库预览图(请求体是图片原样字节,[sha] 为其 sha256)。超额度时
+  /// 抛 status 413 的 [BackendException]。
+  Future<void> uploadTagPreview(
+    String sessionId,
+    String sha,
+    Uint8List bytes,
+  ) => _handle(
+    () => _http.put(
+      _u('/user-tag-previews/$sha'),
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Authorization': 'Bearer $sessionId',
+      },
+      body: bytes,
+    ),
+    timeout: _sendTimeout(bytes.length, null),
+  );
+
+  /// 云端预览图的完整地址(不鉴权,哈希即凭证)。
+  String tagPreviewUrl(String sha) => '$baseUrl/api/user-tag-previews/$sha';
+
+  /// 取一张云端预览图。
+  Future<Uint8List> fetchTagPreview(String sha) async {
+    if (baseUrl.isEmpty) throw BackendException('未配置后端地址');
+    final http.Response resp;
+    try {
+      resp = await _http
+          .get(Uri.parse(tagPreviewUrl(sha)))
+          .timeout(const Duration(seconds: 60));
+    } on TimeoutException {
+      throw BackendException('取预览图超时,请检查网络');
+    } catch (_) {
+      throw BackendException('取预览图失败,请检查网络');
+    }
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw BackendException(
+        '取预览图失败(${resp.statusCode})',
+        status: resp.statusCode,
+      );
+    }
+    return resp.bodyBytes;
   }
 
   // ── 个人云端 Vibe 库(与 web 桌面端共用一份,按 bot_user_id 存)────────
@@ -2203,21 +2136,6 @@ class BackendClient {
     }, sessionId);
   }
 
-  /// 备份/恢复操作记录(最近 20 条,与 web 共用)。失败给空表,不打扰主流程。
-  Future<List<BackupLogEntry>> getBackupLog(String sessionId) async {
-    try {
-      final j = await _getJson('/user-vibes/backup-log', sessionId);
-      final log = j['log'];
-      if (log is! List) return const [];
-      return [
-        for (final e in log)
-          if (e is Map<String, dynamic>) BackupLogEntry.fromJson(e),
-      ];
-    } catch (_) {
-      return const [];
-    }
-  }
-
   /// NAI 官方超分(bot 模式;登录:Bearer 头)。后端按 [mode] 分流到两个并存的端点:
   ///  - `legacy`(默认):api 子域传统超分,4×,仅 832×1216/1216×832/1024²,固定 7 点
   ///  - `nai5`:image 子域 V5 扩散超分,固定 2×、输入尺寸无白名单,按源图 1–4 点
@@ -2274,7 +2192,7 @@ class BackendClient {
     );
   }
 
-  // ── 统计 / 账单(个人中心,对齐 web)────────────────
+  // ── 统计(个人中心,对齐 web)────────────────
   // 除 online/count 外全部要求 Bearer 会话。会话**只走 Authorization 头,不进
   // query** —— URL 会原样落进服务端与各级代理的访问日志(S1A-01)。后端
   // require_session 目前还留着 `?session_id=` 回退,但那只为兼容老 web,新客户端
@@ -2348,58 +2266,6 @@ class BackendClient {
     return (j['count'] as num?)?.toInt() ?? 0;
   }
 
-  /// 本期费用预估(当前 27 日周期,含阶梯边界与各阶分布)。
-  Future<BillingReport> billingEstimate(String sessionId) async {
-    return BillingReport.fromJson(
-      await _getJson('/billing/estimate', sessionId),
-    );
-  }
-
-  /// 指定窗口的消耗明细。窗口传当天 00:00 ~ 次日 00:00 即得「当日逐笔」。
-  /// 归属由后端从会话强制取(`user_id = session.bot_user_id`,只能查自己),
-  /// 早先那个 `user_id` query 线上已被忽略 —— 一并去掉,别白送 bot 账号进日志。
-  Future<UsageDetails> usageDetails({
-    required String sessionId,
-    required DateTime from,
-    required DateTime to,
-  }) async {
-    String iso(DateTime d) =>
-        '${d.year.toString().padLeft(4, '0')}-'
-        '${d.month.toString().padLeft(2, '0')}-'
-        '${d.day.toString().padLeft(2, '0')}T00:00:00';
-    final j = await _getJson(
-      '/billing/user/details'
-      '?period_start=${Uri.encodeComponent(iso(from))}'
-      '&period_end=${Uri.encodeComponent(iso(to))}',
-      sessionId,
-      const Duration(seconds: 30),
-    );
-    final recs = j['recent_records'];
-    final bd = j['type_breakdown'];
-    return UsageDetails(
-      records: [
-        for (final r in recs is List ? recs : const [])
-          if (r is Map<String, dynamic>) PointRecord.fromJson(r),
-      ],
-      breakdown: [
-        for (final b in bd is List ? bd : const [])
-          if (b is Map)
-            (
-              reason: b['reason']?.toString() ?? '未知',
-              points: (b['total_points'] as num?)?.toInt() ?? 0,
-              count: (b['count'] as num?)?.toInt() ?? 0,
-              v5Points: (b['v5_points'] as num?)?.toInt() ?? 0,
-              v5Count: (b['v5_count'] as num?)?.toInt() ?? 0,
-            ),
-      ],
-      v5Calls: (j['total_v5_calls'] as num?)?.toInt() ?? 0,
-      v5Points: (j['total_v5_points'] as num?)?.toInt() ?? 0,
-      localCalls: (j['total_local_calls'] as num?)?.toInt() ?? 0,
-      imageCalls: (j['total_image_calls'] as num?)?.toInt() ?? 0,
-      points: (j['total_points'] as num?)?.toInt() ?? 0,
-    );
-  }
-
   /// 逐笔生成明细(含分辨率/步数/模型)。窗口传当天 00:00 ~ 次日 00:00。
   /// 需要服务端 `/api/user/stats/calls`(未部署该接口时抛 404,调用方降级)。
   Future<List<CallRecord>> callRecords({
@@ -2426,7 +2292,6 @@ class BackendClient {
   }
 
   /// 点数逐笔(按 today/week/month 取,服务端上限 50 条)。
-  /// [usageDetails] 拿不到归属 id 时的兜底。
   Future<List<PointRecord>> pointRecords(String sessionId, String range) async {
     final j = await _getJson('/user/stats/points?time_range=$range', sessionId);
     final recs = j['records'];
@@ -2436,12 +2301,72 @@ class BackendClient {
     ];
   }
 
-  /// 上期结算(含阶梯边界/分布与支付状态;付款流程留在 web)。
-  Future<BillingReport> billingSettlement(String sessionId) async {
-    return BillingReport.fromJson(
-      await _getJson('/billing/settlement', sessionId),
+  // ── 钱包(服务端 `server/wallet.py`)────────────────
+  // 2026-10-18 起取代原来的账单 / 结算 / 算力账单那一套(那几个端点已删,
+  // 老版本调到就是 404)。会话照旧只走 Authorization 头;钱包归属由服务端
+  // 从会话里取,只能看自己的。
+
+  /// 我的钱包。[limit] = 顺带下发最近几笔(0~50);只要余额就传 0。
+  Future<WalletSummary> wallet(String sessionId, {int limit = 10}) async =>
+      WalletSummary.fromJson(await _getJson('/wallet?limit=$limit', sessionId));
+
+  /// 流水翻页,新→旧。
+  ///
+  /// [cursor] 传上一页的 [WalletLedger.nextCursor],不传 = 第一页;
+  /// [kind] ∈ `all` / `charge`(只看扣款)/ `credit`(只看入账);
+  /// [since] / [until] 只取年月日、按北京时间的日期算,含头不含尾 ——
+  /// 看某一天就传那天和下一天。
+  Future<WalletLedger> walletLedger(
+    String sessionId, {
+    int limit = 50,
+    String? cursor,
+    String kind = 'all',
+    DateTime? since,
+    DateTime? until,
+  }) async {
+    String ymd(DateTime d) =>
+        '${d.year.toString().padLeft(4, '0')}-'
+        '${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
+    final q = [
+      'limit=$limit',
+      'kind=${Uri.encodeComponent(kind)}',
+      if (cursor != null && cursor.isNotEmpty)
+        'cursor=${Uri.encodeComponent(cursor)}',
+      if (since != null) 'since=${ymd(since)}',
+      if (until != null) 'until=${ymd(until)}',
+    ];
+    return WalletLedger.fromJson(
+      await _getJson('/wallet/ledger?${q.join('&')}', sessionId),
     );
   }
+
+  // ── API 密钥(服务端 `backend/routes/api_keys.py`)──────────
+  // 会话照旧走 Authorization 头,只能管自己的。
+
+  Future<ApiKeyList> apiKeys(String sessionId) async =>
+      ApiKeyList.fromJson(await _getJson('/user/api-keys', sessionId));
+
+  /// 新建一把。[name] 可空,服务端截到 20 字;满 3 把回 400,detail 直出。
+  Future<CreatedApiKey> createApiKey(
+    String sessionId, {
+    String name = '',
+  }) async => CreatedApiKey.fromJson(
+    await _postJson('/user/api-keys', {'name': name}, sessionId),
+  );
+
+  /// 撤销一把,立即生效。已经撤销过 / 不是自己的回 404。
+  Future<void> revokeApiKey(String sessionId, int id) async {
+    await _handle(
+      () =>
+          _http.delete(_u('/user/api-keys/$id'), headers: _headers(sessionId)),
+    );
+  }
+
+  /// 收款码图片地址(公开端点,直接交给 RemoteImage)。[type] ∈ `wechat` /
+  /// `alipay`。路径沿用旧名;没配收款码时回 404。
+  String paymentQrUrl(String type) =>
+      '$baseUrl/api/billing/qrcode?type=${Uri.encodeComponent(type)}';
 
   // ── LoRA 管理(anima / krea 出图渠道,契约对齐 web loraService.ts) ──
   //
@@ -2718,67 +2643,13 @@ class BackendClient {
     return (ok: j['ok'] == true, message: j['message']?.toString() ?? '');
   }
 
-  /// 自然语言补强(anima 专属;登录:Bearer 头)。读当前正向词,产出可追加到
-  /// 其末尾的英文句子 —— anima 是 tag + 自然语言混训,句子负责空间关系/构图/
-  /// 光影/动作因果。一次 LLM 往返、非流式。
-  ///
-  /// [mode] 只接受 `characters`(多角色区分)/ `enhance`(整体补强);
-  /// [positive] 须是剥净仅编辑期语法的定稿(app 里即 `GenerateState.prompt`),
-  /// 空则服务端 400。[loras] 形如 `[{name, trigger_words}]`,仅作角色识别线索。
-  ///
-  /// 超时给 60s:服务端自己 45s 掐(504 带人话 detail),本地先断就只剩
-  /// 「连接后端超时」这句没信息量的兜底。
-  Future<AnimaNlResult> animaNl({
-    required String sessionId,
-    required String mode,
-    required String positive,
-    String extra = '',
-    String existingNl = '',
-    List<Map<String, dynamic>> loras = const [],
-  }) async {
-    final j = await _postJson(
-      '/agent/web/anima-nl',
-      {
-        'mode': mode,
-        'positive': positive,
-        'extra': extra,
-        'existing_nl': existingNl,
-        'loras': loras,
-      },
-      sessionId,
-      const Duration(seconds: 60),
-    );
-    return AnimaNlResult.fromJson(j);
-  }
-
-  /// 提示词整理(krea 专属;登录:Bearer 头)。读当前正向词,产出**整条新的**
-  /// 正向词 —— k2 用 Qwen3-VL 做文本编码器,吃的是连贯自然语言,不吃 tag 串。
-  ///
-  /// [mode] 只接受 `rewrite`(tag 串 → 完整语句)/ `enrich`(不改主体,补光线、
-  /// 材质、镜头与氛围);[positive] 须是剥净仅编辑期语法的定稿,空则服务端 400。
-  /// [loras] 形如 `[{name, trigger_words}]` —— 触发短语是权重开关,服务端会
-  /// 要求原样保留进结果。**只管正向**,排除内容不在本模块职责内(故无该字段)。
-  ///
-  /// 超时同 [animaNl] 给 60s:服务端自己 45s 掐(504 带人话 detail)。
-  Future<KreaPromptResult> kreaPrompt({
-    required String sessionId,
-    required String mode,
-    required String positive,
-    String extra = '',
-    List<Map<String, dynamic>> loras = const [],
-  }) async {
-    final j = await _postJson(
-      '/agent/web/krea-prompt',
-      {'mode': mode, 'positive': positive, 'extra': extra, 'loras': loras},
-      sessionId,
-      const Duration(seconds: 60),
-    );
-    return KreaPromptResult.fromJson(j);
-  }
-
   /// AI 助手可选的 LLM 渠道 + 服务端当前默认(`MODEL_CHOICES` 原样下发)。
   /// 公开端点,不带会话 —— 它只是一张展示用的表,没有用户数据。
   Future<Map<String, dynamic>> agentModels() => _getJson('/agent/models');
+
+  /// AI 助手「生成图片」能用的后端出图渠道。带会话时每条附所在额度池的剩余次数。
+  Future<Map<String, dynamic>> agentImageChannels(String sessionId) =>
+      _getJson('/agent/image/channels', sessionId.isEmpty ? null : sessionId);
 }
 
 /// 用当前后端基址构造 client(基址变更自动重建)。

@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../l10n/l10n.dart';
 import '../store/app_stores.dart';
 import '../store/prefs_store.dart';
+import 'app_theme.dart';
 
 /// 主题色档位。
 class ThemeSeed {
@@ -18,21 +20,46 @@ class ThemeSeed {
 // 按色环排列(新增档位只管加,持久化按 key 不受顺序影响)。
 const themeSeeds = <ThemeSeed>[
   ThemeSeed('gold', '金', Color(0xFFD4A72C)),
-  ThemeSeed('orange', '橙', Color(0xFFEF6C00)),
-  ThemeSeed('red', '红', Color(0xFFC62828)),
   ThemeSeed('rose', '粉', Color(0xFFD81B60)),
-  ThemeSeed('plum', '梅', Color(0xFF8E24AA)),
   ThemeSeed('violet', '紫', Color(0xFF6750A4)),
-  ThemeSeed('indigo', '靛', Color(0xFF3949AB)),
   ThemeSeed('sky', '浅蓝', Color(0xFF4FA3E3)),
   ThemeSeed('teal', '青', Color(0xFF00897B)),
-  ThemeSeed('green', '绿', Color(0xFF2E7D32)),
-  ThemeSeed('brown', '棕', Color(0xFF795548)),
-  ThemeSeed('grey', '灰', Color(0xFF607D8B)),
 ];
+
+/// 下架的档位就近归到留下的那档。
+const _retiredSeeds = {
+  'orange': 'gold',
+  'brown': 'gold',
+  'red': 'rose',
+  'plum': 'violet',
+  'indigo': 'sky',
+  'grey': 'sky',
+  'green': 'teal',
+};
 
 /// 默认主题色(未选过时的档位)。
 const kDefaultSeedKey = 'sky';
+
+/// 浮卡主题:固定配色 + 组件外观,不走种子取色。和种子档位共用
+/// [ThemeSettings.seedKey]:蓝色是 `float`,其余 `float:<档位>`。
+const kFloatThemeKey = 'float';
+
+String floatThemeKey(FloatAccent a) =>
+    a == kFloatBlue ? kFloatThemeKey : '$kFloatThemeKey:${a.key}';
+
+FloatAccent? _floatAccentOf(String key) {
+  for (final a in floatAccents) {
+    if (floatThemeKey(a) == key) return a;
+  }
+  return null;
+}
+
+/// 认得的档位原样留,下架的就近归档,其余回退默认。
+String _seedKeyOf(Object? v) {
+  if (v is! String) return kDefaultSeedKey;
+  if (_floatAccentOf(v) != null || themeSeeds.any((s) => s.key == v)) return v;
+  return _retiredSeeds[v] ?? kDefaultSeedKey;
+}
 
 /// 外观与触感设置(持久化):深浅模式 + 主题色 + 振动总开关 + 版式偏好。
 class ThemeSettings {
@@ -42,6 +69,8 @@ class ThemeSettings {
     this.haptics = true,
     this.showAssistant = true,
     this.compactCharCards = false,
+    this.systemPicker,
+    this.language = '',
   });
 
   final ThemeMode mode;
@@ -60,10 +89,25 @@ class ThemeSettings {
   /// 创作页角色卡去掉头像预览,只留名称、位置与提示词。
   final bool compactCharCards;
 
+  /// 选图走系统选择器(true)还是应用内图库(false);null = 没选过,按机型
+  /// 默认(见 `image_pick.dart` 的 `_inAppGallery`)。仅 Android 生效。
+  final bool? systemPicker;
+
+  /// 界面语言:`zh` / `en` / `ja`;空串 = 跟随系统。
+  final String language;
+
+  Locale? get locale => language.isEmpty ? null : Locale(language);
+
   ThemeSeed get seed => themeSeeds.firstWhere(
     (s) => s.key == seedKey,
     orElse: () => themeSeeds.firstWhere((s) => s.key == kDefaultSeedKey),
   );
+
+  /// 选的浮卡档位;种子档位为 null。
+  FloatAccent? get floatAccent => _floatAccentOf(seedKey);
+
+  /// 选的是浮卡主题,不是种子档位。
+  bool get float => floatAccent != null;
 
   ThemeSettings copyWith({
     ThemeMode? mode,
@@ -71,23 +115,34 @@ class ThemeSettings {
     bool? haptics,
     bool? showAssistant,
     bool? compactCharCards,
+    bool? systemPicker,
+    String? language,
   }) => ThemeSettings(
     mode: mode ?? this.mode,
     seedKey: seedKey ?? this.seedKey,
     haptics: haptics ?? this.haptics,
     showAssistant: showAssistant ?? this.showAssistant,
     compactCharCards: compactCharCards ?? this.compactCharCards,
+    systemPicker: systemPicker ?? this.systemPicker,
+    language: language ?? this.language,
   );
 
-  /// 脏数据(旧版本/已下架的档位,如早先那档深蓝)回退默认。
+  /// 脏数据(旧版本/早先那档深蓝等)回退默认。
   factory ThemeSettings.fromJson(Map<String, dynamic> j) => ThemeSettings(
     mode: ThemeMode.values.asNameMap()[j['mode']] ?? ThemeMode.light,
-    seedKey: themeSeeds.any((s) => s.key == j['seed'])
-        ? j['seed'] as String
-        : kDefaultSeedKey,
+    seedKey: _seedKeyOf(j['seed']),
     haptics: j['haptics'] != false,
     showAssistant: j['showAssistant'] != false,
     compactCharCards: j['compactCharCards'] == true,
+    systemPicker: switch (j['systemPicker']) {
+      final bool v => v,
+      _ => null,
+    },
+    language: switch (j['language']) {
+      final String v when kSupportedLocales.any((l) => l.languageCode == v) =>
+        v,
+      _ => '',
+    },
   );
 
   Map<String, dynamic> toJson() => {
@@ -96,6 +151,8 @@ class ThemeSettings {
     'haptics': haptics,
     'showAssistant': showAssistant,
     'compactCharCards': compactCharCards,
+    'systemPicker': ?systemPicker,
+    if (language.isNotEmpty) 'language': language,
   };
 
   @override
@@ -105,11 +162,20 @@ class ThemeSettings {
       other.seedKey == seedKey &&
       other.haptics == haptics &&
       other.showAssistant == showAssistant &&
-      other.compactCharCards == compactCharCards;
+      other.compactCharCards == compactCharCards &&
+      other.systemPicker == systemPicker &&
+      other.language == language;
 
   @override
-  int get hashCode =>
-      Object.hash(mode, seedKey, haptics, showAssistant, compactCharCards);
+  int get hashCode => Object.hash(
+    mode,
+    seedKey,
+    haptics,
+    showAssistant,
+    compactCharCards,
+    systemPicker,
+    language,
+  );
 }
 
 const _key = 'theme_settings';

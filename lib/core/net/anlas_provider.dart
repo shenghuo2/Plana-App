@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../auth/auth_mode.dart';
@@ -64,6 +66,8 @@ class AnlasNotifier extends AsyncNotifier<NaiSubscription?> {
       final mode = ref.read(authModeProvider).value;
       final NaiSubscription? next;
       if (mode == AuthMode.bot) {
+        // bot 线顶栏报的是钱包余额,扣费处都走这里刷新,钱包一并拉
+        unawaited(ref.read(walletSummaryProvider.notifier).refresh());
         final base = await ref.read(backendBaseProvider.future);
         if (base.isEmpty) return;
         if (blank) state = const AsyncLoading();
@@ -140,6 +144,21 @@ class NaiQuotaNotifier extends AsyncNotifier<NaiQuota?> {
     if (next != null) state = AsyncData(next); // 拉失败保留旧值
   }
 
+  /// 拨中转开关,成功后只改本地那两项(回执就是开关的最新状态)。失败抛出。
+  Future<void> setRelay(bool enabled) async {
+    final session = await ref.read(botSessionProvider.future);
+    if (session == null) throw StateError('未授权');
+    final r = await ref
+        .read(backendClientProvider)
+        .setMyRelay(session.sessionId, enabled);
+    final q = state.value;
+    if (q != null) {
+      state = AsyncData(
+        q.copyWith(relayEnabled: r.enabled, relayAvailable: r.available),
+      );
+    }
+  }
+
   /// 拿不到就 null:老服务端根本没有这个端点(404),那时整块不显示,
   /// 而不是弹一个用户什么也做不了的错。
   Future<NaiQuota?> _fetch(String sessionId) async {
@@ -148,5 +167,40 @@ class NaiQuotaNotifier extends AsyncNotifier<NaiQuota?> {
     } catch (_) {
       return null;
     }
+  }
+}
+
+/// 我的钱包(`GET /api/wallet`,余额 + 在跑的租卡,**bot 授权线专有**)。
+/// 创作页顶栏、统计页的入口副行和钱包页顶部共用。
+/// 最近几笔不要(limit=0):钱包页的列表走流水翻页,不靠这里。
+final walletSummaryProvider =
+    AsyncNotifierProvider<WalletSummaryNotifier, WalletSummary?>(
+      WalletSummaryNotifier.new,
+    );
+
+class WalletSummaryNotifier extends AsyncNotifier<WalletSummary?> {
+  @override
+  Future<WalletSummary?> build() async {
+    final session = await ref.watch(botSessionProvider.future);
+    if (session == null) return null;
+    try {
+      return await ref
+          .watch(backendClientProvider)
+          .wallet(session.sessionId, limit: 0);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 静默拉新(生成后 / 弹层打开):不置 loading,拉失败保留旧值。
+  Future<void> refresh() async {
+    final session = await ref.read(botSessionProvider.future);
+    if (session == null) return;
+    try {
+      final next = await ref
+          .read(backendClientProvider)
+          .wallet(session.sessionId, limit: 0);
+      state = AsyncData(next);
+    } catch (_) {}
   }
 }

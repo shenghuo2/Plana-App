@@ -5,10 +5,12 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/app_skin.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../generate/widgets/common.dart' show confirmDialog, dropFocusSoon;
-import '../assistant_models.dart';
-import '../assistant_state.dart';
+import '../domain/conversation.dart';
+import '../application/assistant_controller.dart';
+import '../../../l10n/l10n.dart';
 
 Future<void> showHistorySheet(BuildContext context) async {
   await showModalBottomSheet(
@@ -42,7 +44,7 @@ class _HistorySheet extends ConsumerWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      '历史会话',
+                      context.l10n.chatHistory,
                       style: context.texts.titleMedium!.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
@@ -53,9 +55,11 @@ class _HistorySheet extends ConsumerWidget {
                       onPressed: () async {
                         final ok = await confirmDialog(
                           context,
-                          title: '清空历史会话?',
-                          message: '${sessions.length} 段对话都会删掉,已经写进创作页的改动不受影响。',
-                          confirmLabel: '清空',
+                          title: context.l10n.clearHistoryQ,
+                          message: context.l10n.clearHistoryBody(
+                            sessions.length,
+                          ),
+                          confirmLabel: context.l10n.clear,
                         );
                         if (ok) n.clearSessions();
                       },
@@ -63,7 +67,7 @@ class _HistorySheet extends ConsumerWidget {
                         foregroundColor: scheme.error,
                         minimumSize: const Size(0, 44),
                       ),
-                      child: const Text('清空'),
+                      child: Text(context.l10n.clear),
                     ),
                 ],
               ),
@@ -72,7 +76,7 @@ class _HistorySheet extends ConsumerWidget {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 30, 20, 46),
                 child: Text(
-                  '还没有归档的对话。\n点右上角「新对话」就会把当前这段存进来。',
+                  context.l10n.noArchivedChats,
                   textAlign: TextAlign.center,
                   style: context.texts.bodySmall!.copyWith(
                     color: scheme.onSurfaceVariant,
@@ -130,7 +134,9 @@ class _Row extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.only(bottom: 9),
         child: Material(
-          color: scheme.surfaceContainerLow,
+          color: context.skin.float
+              ? scheme.surfaceContainerHigh
+              : scheme.surfaceContainerLow,
           borderRadius: BorderRadius.circular(14),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
@@ -182,7 +188,7 @@ class _Row extends StatelessWidget {
                       children: [
                         Text(_when(s.at)),
                         const SizedBox(width: 10),
-                        Text('${s.turns} 轮'),
+                        Text(context.l10n.turnsN(s.turns)),
                         if (s.tagCount > 0) ...[
                           const SizedBox(width: 10),
                           Text('${s.tagCount} tag'),
@@ -211,8 +217,8 @@ String _when(int ms) {
   final hm = '${two(t.hour)}:${two(t.minute)}';
   final diff = today.difference(that).inDays;
   if (diff == 0) {
-    return now.difference(t).inMinutes < 3 ? '刚刚' : hm;
+    return now.difference(t).inMinutes < 3 ? l10nNow.justNow : hm;
   }
-  if (diff == 1) return '昨天 $hm';
+  if (diff == 1) return l10nNow.dateYesterday(hm);
   return '${t.month}/${t.day}';
 }

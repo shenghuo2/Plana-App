@@ -9,24 +9,33 @@ import '../../../core/net/backend_client.dart' show NaiQuota;
 import '../../../core/net/nai_client.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
-import '../../stats/stats_providers.dart' show fmtInt;
+import '../../stats/stats_providers.dart' show fmtFen, fmtInt;
+import '../../stats/wallet_page.dart';
 import '../generate_state.dart';
 import '../models.dart' as m;
+import 'common.dart' show hintSnack, sharedAxisRoute;
 import 'top_bar_status.dart';
+import '../../../l10n/l10n.dart';
 
 /// 创作页顶栏的余额入口,以及它点开的「点数与额度」弹层。
 ///
-/// 点数常驻,后面接一格额度百分比 —— 两种接入方式那格的含义不同:
+/// 读数按接入方式取:token 直连报 Anlas 点数,bot 授权报钱包余额。额度画成读数
+/// 底下的一条进度条(精确百分比在弹层里)—— 两种接入方式那条的含义不同:
 ///  - token 直连:**切到 NAI 5 时才出现**,是自己账户的 Opus 充电式额度。
 ///    额度用尽后免费尺寸图会转扣 Anlas,所以点数和额度两个数得同时在场。
-///  - bot 授权:**常驻**,是我们发给你的个人配额(还能出几张)。常驻是因为
-///    它决定「要不要切到 V5 去画」,只有切过去才看得见就晚了。管理员显示 ∞。
+///  - bot 授权:共享号开着时**常驻**,是我们发给你的个人配额(还能出几张)。
+///    常驻是因为它决定「要不要切到 V5 去画」,只有切过去才看得见就晚了。管理员
+///    显示 ∞。共享号停用后配额不生效,不画。
 ///    共享号池的全平台水位不在这儿 —— 那是运维视角,摆在个人胶囊里会被误读成
 ///    「我还有 87%」,而自己可能只剩几张。
 ///
 /// 与算力来源同一路数:顶栏只报一眼能读完的那一段,详情全在弹层里。
 class AnlasChip extends ConsumerWidget {
-  const AnlasChip({super.key});
+  const AnlasChip({super.key, this.budget});
+
+  /// 顶栏给这枚读数留的宽度:「读数 │ 百分比」放得下就这么写,放不下额度
+  /// 改画成读数底下的进度条。null = 不限,总是写百分比。
+  final double? budget;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -37,38 +46,73 @@ class AnlasChip extends ConsumerWidget {
     final model = ref.watch(generateProvider.select((s) => s.params.model));
     final quota = bot ? ref.watch(naiQuotaProvider).asData?.value : null;
     final usage = (!bot && m.isNai5Model(model)) ? sub?.usage : null;
+    final wallet = bot ? ref.watch(walletSummaryProvider) : null;
+    final w = wallet?.value;
 
-    // 第二格:bot 线报自己的配额,直连线报账户电池。两者都拿不到就不摆这一格
-    // (画个「—%」比不画更像出了故障)。
-    final (String?, Color?) badge = switch ((quota, usage)) {
-      (final NaiQuota q, _) => (
-        q.isAdmin ? '∞' : '${quotaPct(q).round()}%',
-        quotaColor(context, q),
+    final String? value;
+    final bool loading;
+    if (bot) {
+      value = w == null ? null : fmtFen(w.balanceFen, sign: false);
+      loading = wallet!.isLoading;
+    } else {
+      value = sub == null ? null : fmtInt(sub.anlas);
+      loading = anlas.isLoading;
+    }
+
+    // 额度画成读数底下的进度条(填多少 = 剩多少):bot 线报自己的配额(共享号
+    // 停用后不画),直连线报账户电池。都拿不到就只有图标 + 读数。
+    final meter = switch ((quota, usage)) {
+      (final NaiQuota q, _) when !q.relayOnly => (
+        fraction: q.isAdmin ? 1.0 : quotaPct(q) / 100,
+        color: quotaColor(context, q),
+        label: q.isAdmin ? '∞' : '${quotaPct(q).round()}%',
       ),
       (_, final NaiUsage u) => (
-        '${u.batteryPct.round()}%',
-        usageColor(context, u),
+        fraction: u.fullPct > 0 ? u.batteryPct / u.fullPct : 0.0,
+        color: usageColor(context, u),
+        label: '${u.batteryPct.round()}%',
       ),
-      _ => (null, null),
+      _ => null,
     };
 
+    // 「读数 │ 百分比」超出 [budget] 就把额度画成读数底下的进度条
+    // (百分比只给读屏),省出来的地方留给画布名和模型名
+    final style = mono(context, size: 15, weight: FontWeight.w700);
+    final percent =
+        meter != null &&
+        (budget == null ||
+            18 +
+                    4 +
+                    topBarTextWidth(context, value ?? '0', style) +
+                    13 +
+                    topBarTextWidth(context, meter.label, style) <=
+                budget!);
+    final bar = meter != null && !percent;
+
     return TopBarStatus(
-      tooltip: '点数与额度',
+      tooltip: bot ? '钱包余额' : context.l10n.anlasAndQuota,
       // 顶栏只报**合计**:常驻在那儿,一眼要的是「还剩多少」。
       // 「订阅额+已购额」的拆分留给弹层里的 Anlas 那行 —— 想分清
       // 哪截月底会重置的人,本来就会点进去看。
-      value: sub == null ? null : fmtInt(sub.anlas),
+      value: value,
+      // 带百分比时按内容宽,不定宽
+      valueSample: percent ? null : _kAnlasSample,
       // 还没数时数值位是一枚刷新图标:首次加载、换接入方式 / 主账号、
       // 弹层里点刷新,正在拉的时候它就转。
-      loading: anlas.isLoading,
-      detail: badge.$1,
-      icon: Icons.toll,
-      valueColor: scheme.primary,
-      detailColor: badge.$2,
+      loading: loading,
+      detail: percent ? meter.label : null,
+      detailColor: percent ? meter.color : null,
+      icon: bot ? Icons.account_balance_wallet_outlined : Icons.toll,
+      meter: bar ? meter : null,
+      // 钱包欠费标错误色
+      valueColor: (w?.owing ?? false) ? scheme.error : scheme.primary,
       onTap: () => showAnlasSheet(context),
     );
   }
 }
+
+/// 顶栏读数位按五位数定宽:点数、余额多少,这块都一样宽。
+const _kAnlasSample = '00,000';
 
 /// 点数读数(**弹层内**用):手里有已购额时摊开成「订阅额+已购额」,订阅额在前;
 /// 没有就一个数。
@@ -246,6 +290,10 @@ class _AnlasSheetState extends ConsumerState<_AnlasSheet> {
     final usage = sub?.usage;
     final bot = ref.watch(authModeProvider).value == AuthMode.bot;
     final quota = bot ? ref.watch(naiQuotaProvider).asData?.value : null;
+    final wallet = bot ? ref.watch(walletSummaryProvider).value : null;
+    // 共享号停用:额度卡换成中转开关,额度那几行不摆,点数报自己的
+    final relay = quota != null && quota.relayOnly;
+    final points = wallet?.pointsTenths;
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -259,7 +307,11 @@ class _AnlasSheetState extends ConsumerState<_AnlasSheet> {
               child: Row(
                 children: [
                   Text(
-                    '点数与额度',
+                    !bot
+                        ? context.l10n.anlasAndQuota
+                        : relay
+                        ? '钱包与中转'
+                        : '钱包与额度',
                     style: context.texts.titleMedium!.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
@@ -271,7 +323,7 @@ class _AnlasSheetState extends ConsumerState<_AnlasSheet> {
                       _refresh();
                     },
                     visualDensity: VisualDensity.compact,
-                    tooltip: '刷新',
+                    tooltip: context.l10n.refresh,
                     icon: AnimatedRotation(
                       turns: _turns,
                       duration: Motion.slow,
@@ -289,18 +341,46 @@ class _AnlasSheetState extends ConsumerState<_AnlasSheet> {
             // bot 线只摆**自己的**配额:池子那块是全平台水位,属于运维视角,
             // 放在个人弹层里会让人误以为「我还有 87%」,而自己可能只剩几张。
             // 它在全平台统计页(那儿才是看全局的地方)。
-            if (bot && quota != null)
+            if (bot && quota != null && !relay)
               _MyQuotaCard(quota: quota)
             else if (!bot && usage != null)
               UsageCard(usage: usage),
+            if (bot) ...[
+              _row(
+                context,
+                '钱包余额',
+                wallet == null ? '—' : fmtFen(wallet.balanceFen, sign: false),
+                valueColor: (wallet?.owing ?? false) ? scheme.error : null,
+                onTap: () {
+                  final nav = Navigator.of(context);
+                  nav.pop();
+                  nav.push(sharedAxisRoute(const WalletPage()));
+                },
+              ),
+              _divider(context),
+            ],
+            if (relay) ...[_RelayRow(quota: quota), _divider(context)],
             _row(
               context,
-              '订阅档位',
+              context.l10n.subscriptionTier,
               bot ? 'Bot 授权' : (sub == null ? '—' : naiTierName(sub.tier)),
             ),
             _divider(context),
-            _row(context, 'Anlas 点数', sub == null ? '—' : fmtAnlas(sub)),
-            if (bot) ...[
+            if (relay)
+              _row(
+                context,
+                context.l10n.anlasPoints,
+                points == null ? '—' : _fmtPct(points / 10),
+              )
+            else
+              _row(
+                context,
+                context.l10n.anlasPoints,
+                sub == null ? '—' : fmtAnlas(sub),
+              ),
+            if (relay)
+              ...const <Widget>[]
+            else if (bot) ...[
               // 这两行讲的是**自己的**配额(池子那套不在这个弹层里)。
               // 拿不到时照样把行摆出来报「—」,不要静默少一块。
               _divider(context),
@@ -321,14 +401,14 @@ class _AnlasSheetState extends ConsumerState<_AnlasSheet> {
               _divider(context),
               _row(
                 context,
-                '回充速率',
+                context.l10n.refillRate,
                 usage.refillPctPerHour <= 0
                     ? '—'
                     : '${_fmtRate(usage.refillPctPerHour)}% / '
-                          '${fmtInt(usage.imagesPerHour)} 张 / 时',
+                          '${context.l10n.imagesPerHour(fmtInt(usage.imagesPerHour))}',
               ),
               _divider(context),
-              _row(context, '距充满', _fmtDaysToFull(usage)),
+              _row(context, context.l10n.timeToFull, _fmtDaysToFull(usage)),
             ] else ...[
               // 电池缺席时**说明白为什么**,不要静默少一块。两种缺席原因对用户的
               // 意思完全不同:非 Opus 是没这项权益、Opus 却拿不到则说明接口那三个
@@ -337,8 +417,12 @@ class _AnlasSheetState extends ConsumerState<_AnlasSheet> {
               _divider(context),
               _row(
                 context,
-                'NAI 5 额度',
-                sub == null ? '—' : (sub.tier == 3 ? '接口未下发' : '仅 Opus'),
+                context.l10n.nai5Quota,
+                sub == null
+                    ? '—'
+                    : (sub.tier == 3
+                          ? context.l10n.notProvided
+                          : context.l10n.opusOnly),
               ),
             ],
           ],
@@ -466,6 +550,93 @@ class _MyQuotaCard extends StatelessWidget {
   }
 }
 
+/// 中转出图开关(共享号停用后替换「我的 NAI 5 额度」):一行开关 + 一行单价。
+/// 不开就出不了 NAI 图,开关得在这里拨得到。
+class _RelayRow extends ConsumerStatefulWidget {
+  const _RelayRow({required this.quota});
+
+  final NaiQuota quota;
+
+  @override
+  ConsumerState<_RelayRow> createState() => _RelayRowState();
+}
+
+class _RelayRowState extends ConsumerState<_RelayRow> {
+  /// 拨动中的目标值;null = 没在设置。
+  bool? _pending;
+
+  Future<void> _toggle(bool enabled) async {
+    Haptics.selection();
+    setState(() => _pending = enabled);
+    try {
+      await ref.read(naiQuotaProvider.notifier).setRelay(enabled);
+    } catch (_) {
+      if (mounted) hintSnack(context, '没有设置成功,请稍后再试');
+    } finally {
+      if (mounted) setState(() => _pending = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    final q = widget.quota;
+    // 不足 1 分的到厘
+    String yuan(double v) =>
+        '¥${v.toStringAsFixed(3).replaceFirst(RegExp(r'0$'), '')}';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 5, 4, 11),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Text(
+                '中转出图',
+                style: context.texts.bodyMedium!.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const Spacer(),
+              if (q.relayAvailable)
+                Switch(
+                  value: _pending ?? q.relayEnabled,
+                  onChanged: _pending == null ? _toggle : null,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                )
+              else
+                // 和开关同高,行高不跟着变
+                SizedBox(
+                  height: 32,
+                  child: Center(
+                    child: Text(
+                      '暂不可用',
+                      style: context.texts.bodyMedium!.copyWith(
+                        color: scheme.error,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (q.relayAvailable)
+            Text(
+              q.relayPrice == q.relayPriceLegacy
+                  ? '每张从钱包扣 ${yuan(q.relayPrice)}'
+                  : '每张从钱包扣 V5 ${yuan(q.relayPrice)} · '
+                        'V4.5 及更早 ${yuan(q.relayPriceLegacy)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.texts.labelSmall!.copyWith(color: scheme.outline),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 回满还要几小时;不回充或已满时为 0(调用方据此不报这一段)。
 double _hoursToFull(NaiQuota q) {
   if (q.refillPerDay <= 0 || q.balance >= q.limit) return 0;
@@ -516,8 +687,8 @@ class UsageCard extends StatelessWidget {
                 // bot 线是多个服务号合出来的一块:标上号数,不然「87%」看着像
                 // 一个账户的水位,而下面那个张数却是好几个号的总量,对不上。
                 usage.accounts > 1
-                    ? 'NAI 5 额度 · ${usage.accounts} 号'
-                    : 'NAI 5 额度',
+                    ? context.l10n.nai5QuotaAccounts(usage.accounts)
+                    : context.l10n.nai5Quota,
                 style: context.texts.bodyMedium!.copyWith(
                   color: scheme.onSurfaceVariant,
                   fontWeight: FontWeight.w600,
@@ -548,23 +719,29 @@ class UsageCard extends StatelessWidget {
           Row(
             children: [
               Text(
-                '约 ${fmtInt(usage.imagesRemaining)} 张',
+                context.l10n.aboutImages(fmtInt(usage.imagesRemaining)),
                 style: context.texts.bodySmall!.copyWith(
                   color: scheme.onSurfaceVariant,
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              const Spacer(),
-              Text(
-                // 已耗尽时不报「明天到几成」:只知道跌破了 0,不知道跌了多深。
-                usage.isNegative
-                    ? '已用尽 · 免费尺寸图改扣 Anlas'
-                    : (usage.refillPctPerDay <= 0
-                          ? '已充满'
-                          : '24 小时后 ${_fmtPct(tomorrow)}%'),
-                style: context.texts.bodySmall!.copyWith(
-                  color: usage.isNegative ? color : scheme.outline,
-                  fontWeight: FontWeight.w600,
+              const SizedBox(width: 12),
+              // 英文的「已用尽」那句长,放不下时截断
+              Expanded(
+                child: Text(
+                  // 已耗尽时不报「明天到几成」:只知道跌破了 0,不知道跌了多深。
+                  usage.isNegative
+                      ? context.l10n.quotaExhausted
+                      : (usage.refillPctPerDay <= 0
+                            ? context.l10n.quotaFull
+                            : context.l10n.quotaIn24h(_fmtPct(tomorrow))),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.end,
+                  style: context.texts.bodySmall!.copyWith(
+                    color: usage.isNegative ? color : scheme.outline,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],
@@ -575,34 +752,54 @@ class UsageCard extends StatelessWidget {
   }
 }
 
-Widget _row(BuildContext context, String label, String value) => Padding(
-  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 11),
-  child: Row(
-    children: [
-      Text(
-        label,
-        style: context.texts.bodyMedium!.copyWith(
-          color: context.scheme.onSurfaceVariant,
-        ),
-      ),
-      const SizedBox(width: 12),
-      // 值这边**不能**再摆 Spacer:它跟 Flexible 一样是弹性子项,两者会把余量
-      // 对半分,值只拿到一半宽度 —— 明明放得下也提前打省略号。让 Flexible 独占
-      // 余量、文字自己右对齐就行。
-      Expanded(
-        child: Text(
-          value,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.right,
+/// 给了 [onTap] 就整行可点,值后面跟一枚箭头。
+Widget _row(
+  BuildContext context,
+  String label,
+  String value, {
+  Color? valueColor,
+  VoidCallback? onTap,
+}) {
+  final row = Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 11),
+    child: Row(
+      children: [
+        Text(
+          label,
           style: context.texts.bodyMedium!.copyWith(
-            fontWeight: FontWeight.w700,
+            color: context.scheme.onSurfaceVariant,
           ),
         ),
-      ),
-    ],
-  ),
-);
+        const SizedBox(width: 12),
+        // 值这边**不能**再摆 Spacer:它跟 Flexible 一样是弹性子项,两者会把余量
+        // 对半分,值只拿到一半宽度 —— 明明放得下也提前打省略号。让 Flexible 独占
+        // 余量、文字自己右对齐就行。
+        Expanded(
+          child: Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
+            style: context.texts.bodyMedium!.copyWith(
+              color: valueColor,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        if (onTap != null) ...[
+          const SizedBox(width: 2),
+          Icon(Icons.chevron_right, size: 20, color: context.scheme.outline),
+        ],
+      ],
+    ),
+  );
+  if (onTap == null) return row;
+  return InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(10),
+    child: row,
+  );
+}
 
 Widget _divider(BuildContext context) => Divider(
   height: 1,
@@ -628,9 +825,9 @@ String _fmtRate(double v) => _fmtPct(v, digits: v >= 1 ? 1 : 2);
 
 /// 距充满:满电直说满电,不到一天报小时,否则报天。
 String _fmtDaysToFull(NaiUsage u) {
-  if (u.batteryPct >= u.fullPct) return '已充满';
+  if (u.batteryPct >= u.fullPct) return l10nNow.quotaFull;
   final d = u.daysToFull;
   if (d == null) return '—';
-  if (d < 1) return '约 ${(d * 24).round()} 小时';
-  return '约 ${_fmtPct(d)} 天';
+  if (d < 1) return l10nNow.aboutHours((d * 24).round());
+  return l10nNow.aboutDays(_fmtPct(d));
 }
