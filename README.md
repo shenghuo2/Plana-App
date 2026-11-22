@@ -121,7 +121,9 @@ NAI 5 载荷契约、Argon2id 派生均由参考向量钉住,改动对不上即�
 经 Android 构建和验收后,从已验证提交手动发布 GitHub Release。桌面端
 (`feature/desktop-platforms`、Windows / macOS 构建)已移至独立仓库维护,本仓库不再构建或发布桌面端产物。
 只有非草稿、非 prerelease 的正式版才合并到 `main`;任何分支的 push 都不得自动发布。
-历史分支和 tag 保留。具体约束见 [AGENTS.md](AGENTS.md)。
+历史分支和 tag 保留。具体约束见 [AGENTS.md](AGENTS.md)。贡献者在本地提交前请先执行
+`git config core.hooksPath .githooks` 启用版本化提交钩子,GitHub Actions 亦会通过
+`.github/workflows/commit-guard.yml` 强行校验提交规范与暂存区卫生。
 
 ## 致谢与出处
 
