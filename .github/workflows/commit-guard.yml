@@ -1,0 +1,53 @@
+name: Commit & Hygiene Guard
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'feature/**'
+      - 'release/**'
+  pull_request:
+    branches:
+      - 'main'
+      - 'feature/**'
+      - 'release/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Validate commits and hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch dev baseline
+        shell: bash
+        run: git fetch --no-tags origin dev:refs/remotes/origin/dev || true
+
+      - name: Validate commits and staged hygiene rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          python3 .githooks/validate.py ci-check \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --exempt-ref refs/remotes/origin/dev \
+            --exempt-ref 35ffe8b9b91213d73d8db4af21784828eec43558 \
+            --exempt-ref dc2c307b2467233d569fdb419e7b337dff796bb4
