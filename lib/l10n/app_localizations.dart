@@ -508,6 +508,18 @@ abstract class AppLocalizations {
   /// **'角色&风格'**
   String get refCharacterStyle;
 
+  /// No description provided for @refOutfit.
+  ///
+  /// In zh, this message translates to:
+  /// **'服装'**
+  String get refOutfit;
+
+  /// No description provided for @preferSameOutfit.
+  ///
+  /// In zh, this message translates to:
+  /// **'优先相同服装'**
+  String get preferSameOutfit;
+
   /// No description provided for @characters.
   ///
   /// In zh, this message translates to:
@@ -1501,8 +1513,26 @@ abstract class AppLocalizations {
   /// No description provided for @charRefOnly45.
   ///
   /// In zh, this message translates to:
-  /// **'角色参考仅 4.5 模型支持,当前模型生成时不会发送。'**
+  /// **'当前模型不支持角色参考，生成时不会发送。'**
   String get charRefOnly45;
+
+  /// No description provided for @charRefOutfitSkipped.
+  ///
+  /// In zh, this message translates to:
+  /// **'当前模型不支持「服装」参考，已选的服装参考图在生成时将被跳过。'**
+  String get charRefOutfitSkipped;
+
+  /// No description provided for @charRefIgnoredInpaint.
+  ///
+  /// In zh, this message translates to:
+  /// **'当前模型重绘时不支持角色参考'**
+  String get charRefIgnoredInpaint;
+
+  /// No description provided for @charRefMaxExceeded.
+  ///
+  /// In zh, this message translates to:
+  /// **'最多同时生效 {max} 张角色参考图，超出的将在生成时被跳过。'**
+  String charRefMaxExceeded(int max);
 
   /// No description provided for @filesImportFailed.
   ///
@@ -4180,11 +4210,11 @@ abstract class AppLocalizations {
   /// **'去 GitHub 下载'**
   String get downloadOnGithub;
 
-  /// No description provided for @ghRateLimited.
+  /// No description provided for @downloadUpdate.
   ///
   /// In zh, this message translates to:
-  /// **'GitHub 查询次数已达上限,请稍后再试'**
-  String get ghRateLimited;
+  /// **'下载新版'**
+  String get downloadUpdate;
 
   /// No description provided for @updateHttpFailed.
   ///
@@ -4204,11 +4234,11 @@ abstract class AppLocalizations {
   /// **'检查更新超时,请检查网络后重试'**
   String get updateTimeout;
 
-  /// No description provided for @cantReachGithub.
+  /// No description provided for @cantReachUpdateServer.
   ///
   /// In zh, this message translates to:
-  /// **'连不上 GitHub,请检查网络后重试'**
-  String get cantReachGithub;
+  /// **'连不上服务器,请检查网络后重试'**
+  String get cantReachUpdateServer;
 
   /// No description provided for @updateFailed.
   ///
@@ -4227,6 +4257,60 @@ abstract class AppLocalizations {
   /// In zh, this message translates to:
   /// **'图片元数据'**
   String get imageMetadata;
+
+  /// No description provided for @compareImages.
+  ///
+  /// In zh, this message translates to:
+  /// **'图片比对'**
+  String get compareImages;
+
+  /// No description provided for @swapAB.
+  ///
+  /// In zh, this message translates to:
+  /// **'交换 A / B'**
+  String get swapAB;
+
+  /// No description provided for @onlyInA.
+  ///
+  /// In zh, this message translates to:
+  /// **'仅 A'**
+  String get onlyInA;
+
+  /// No description provided for @onlyInB.
+  ///
+  /// In zh, this message translates to:
+  /// **'仅 B'**
+  String get onlyInB;
+
+  /// No description provided for @weightChanged.
+  ///
+  /// In zh, this message translates to:
+  /// **'权重不同'**
+  String get weightChanged;
+
+  /// No description provided for @orderChanged.
+  ///
+  /// In zh, this message translates to:
+  /// **'位置不同'**
+  String get orderChanged;
+
+  /// No description provided for @identical.
+  ///
+  /// In zh, this message translates to:
+  /// **'相同'**
+  String get identical;
+
+  /// No description provided for @identicalN.
+  ///
+  /// In zh, this message translates to:
+  /// **'{n} 项相同'**
+  String identicalN(int n);
+
+  /// No description provided for @differentN.
+  ///
+  /// In zh, this message translates to:
+  /// **'{n} 项不同'**
+  String differentN(int n);
 
   /// No description provided for @enterOverwritePrompt.
   ///
@@ -6705,6 +6789,24 @@ abstract class AppLocalizations {
   /// In zh, this message translates to:
   /// **'开始 Max 重绘 ≈{w}×{h} · {model}'**
   String redrawStartMax(int w, int h, String model);
+
+  /// No description provided for @upscaleStart.
+  ///
+  /// In zh, this message translates to:
+  /// **'开始 V5 超分 {w}×{h}'**
+  String upscaleStart(int w, int h);
+
+  /// No description provided for @addToCreate.
+  ///
+  /// In zh, this message translates to:
+  /// **'存入创作页'**
+  String get addToCreate;
+
+  /// No description provided for @savedToImg2ImgUpscale.
+  ///
+  /// In zh, this message translates to:
+  /// **'已存入图生图放大'**
+  String get savedToImg2ImgUpscale;
 
   /// No description provided for @redrawStart.
   ///
@@ -9523,8 +9625,20 @@ abstract class AppLocalizations {
   /// No description provided for @failRetriesDesc.
   ///
   /// In zh, this message translates to:
-  /// **'出错时自动重发，重发时不带附图'**
+  /// **'出错时自动重发'**
   String get failRetriesDesc;
+
+  /// No description provided for @retryStripImage.
+  ///
+  /// In zh, this message translates to:
+  /// **'最后一次重试不带图'**
+  String get retryStripImage;
+
+  /// No description provided for @retryStripImageDesc.
+  ///
+  /// In zh, this message translates to:
+  /// **'最后一次失败重试时去掉附图'**
+  String get retryStripImageDesc;
 
   /// No description provided for @refusalRetries.
   ///

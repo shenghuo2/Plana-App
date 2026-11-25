@@ -236,7 +236,7 @@ Future<GithubRelease?> fetchLatestRelease(
         (resp.statusCode == 403 &&
             resp.headers['x-ratelimit-remaining'] == '0')) {
       logd('[update] GitHub API 限流');
-      throw UpdateException(l10nNow.ghRateLimited);
+      throw const UpdateException('GitHub 查询次数已达上限,请稍后再试');
     }
     if (resp.statusCode != 200) {
       throw UpdateException(l10nNow.updateHttpFailed(resp.statusCode));
@@ -247,9 +247,9 @@ Future<GithubRelease?> fetchLatestRelease(
   } on TimeoutException {
     throw UpdateException(l10nNow.updateTimeout);
   } on SocketException {
-    throw UpdateException(l10nNow.cantReachGithub);
+    throw UpdateException(l10nNow.cantReachUpdateServer);
   } on TlsException {
-    throw UpdateException(l10nNow.cantReachGithub);
+    throw UpdateException(l10nNow.cantReachUpdateServer);
   } on UpdateException {
     rethrow;
   } catch (e) {

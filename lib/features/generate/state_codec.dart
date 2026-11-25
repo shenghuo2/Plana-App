@@ -127,6 +127,8 @@ Future<EncodedState> encodeGenerateState(
         'strength': i2i.strength,
         'noise': i2i.noise,
         'image': await putImg(i2i.image),
+        if (i2i.upscale case final u?)
+          'upscale': {'scale': u.scale.name, 'w': u.srcW, 'h': u.srcH},
       },
     'params': {
       'model': p.model,
@@ -340,7 +342,7 @@ Future<GenerateState> decodeGenerateState(
           id: id,
           name: e['name'] is String ? e['name'] as String : '',
           enabled: e['enabled'] != false,
-          mode: _enumByName(CharRefMode.values, e['mode']) ?? CharRefMode.both,
+          mode: CharRefMode.tryParse(e['mode']) ?? CharRefMode.both,
           strength: (e['strength'] as num?)?.toDouble() ?? 1.0,
           infoExtracted: (e['infoExtracted'] as num?)?.toDouble() ?? 1.0,
           image: bytes,
@@ -387,6 +389,7 @@ Future<GenerateState> decodeGenerateState(
         strength: (e['strength'] as num?)?.toDouble() ?? 0.7,
         noise: (e['noise'] as num?)?.toDouble() ?? 0.0,
         image: bytes,
+        upscale: _decodeI2iUpscale(e['upscale']),
       );
     }
   }
@@ -550,7 +553,13 @@ Future<GenerateState> decodeGenerateState(
     usedEntries: _strings(j['usedEntries']),
     characters: characters,
     vibes: vibes,
-    charRefs: charRefs,
+    // 兼容旧存档:重绘态且模型不支持重绘角色参考(如 V5)时,恢复即强制停用
+    charRefs: inpaint != null && !crSupportsInpainting(params.model)
+        ? [
+            for (final r in charRefs)
+              if (r.enabled) r.copyWith(enabled: false) else r,
+          ]
+        : charRefs,
     img2img: img2img,
     params: params,
     anlas: (j['anlas'] as num?)?.toInt() ?? 0,
@@ -666,3 +675,12 @@ List<String> _strings(Object? raw) => raw is List
           if (x is String && x.isNotEmpty) x,
       ]
     : const [];
+
+Img2ImgUpscale? _decodeI2iUpscale(Object? v) {
+  if (v is! Map) return null;
+  final scale = EnhanceScale.values.asNameMap()[v['scale']];
+  final w = (v['w'] as num?)?.toInt() ?? 0;
+  final h = (v['h'] as num?)?.toInt() ?? 0;
+  if (scale == null || w <= 0 || h <= 0) return null;
+  return Img2ImgUpscale(scale: scale, srcW: w, srcH: h);
+}

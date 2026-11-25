@@ -213,6 +213,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get refCharacterStyle => 'Char & Style';
 
   @override
+  String get refOutfit => 'Outfit';
+
+  @override
+  String get preferSameOutfit => 'Prefer same outfit';
+
+  @override
   String get characters => 'Characters';
 
   @override
@@ -822,7 +828,20 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get charRefOnly45 =>
-      'Precise Reference only works with 4.5 models and won\'t be sent with the current model.';
+      'Precise Reference isn\'t supported by the current model and won\'t be sent.';
+
+  @override
+  String get charRefOutfitSkipped =>
+      'The current model doesn\'t support Outfit references; enabled Outfit images will be skipped.';
+
+  @override
+  String get charRefIgnoredInpaint =>
+      'Precise Reference isn\'t supported when inpainting with this model.';
+
+  @override
+  String charRefMaxExceeded(int max) {
+    return 'Up to $max reference images can be used at once; extra ones will be skipped.';
+  }
 
   @override
   String filesImportFailed(int n) {
@@ -2527,7 +2546,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get downloadOnGithub => 'Download on GitHub';
 
   @override
-  String get ghRateLimited => 'GitHub request limit reached; try again later';
+  String get downloadUpdate => 'Download update';
 
   @override
   String updateHttpFailed(int code) {
@@ -2542,8 +2561,8 @@ class AppLocalizationsEn extends AppLocalizations {
       'Update check timed out; check your network and try again';
 
   @override
-  String get cantReachGithub =>
-      'Can\'t reach GitHub; check your network and try again';
+  String get cantReachUpdateServer =>
+      'Can\'t reach the server; check your network and try again';
 
   @override
   String get updateFailed => 'Update check failed; try again later';
@@ -2553,6 +2572,37 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get imageMetadata => 'Image Metadata';
+
+  @override
+  String get compareImages => 'Compare';
+
+  @override
+  String get swapAB => 'Swap A / B';
+
+  @override
+  String get onlyInA => 'A only';
+
+  @override
+  String get onlyInB => 'B only';
+
+  @override
+  String get weightChanged => 'Weight';
+
+  @override
+  String get orderChanged => 'Moved';
+
+  @override
+  String get identical => 'Same';
+
+  @override
+  String identicalN(int n) {
+    return '$n same';
+  }
+
+  @override
+  String differentN(int n) {
+    return '$n different';
+  }
 
   @override
   String get enterOverwritePrompt => 'Enter the prompt to write first';
@@ -4148,6 +4198,17 @@ class AppLocalizationsEn extends AppLocalizations {
   String redrawStartMax(int w, int h, String model) {
     return 'Starting Max enhance ≈$w×$h · $model';
   }
+
+  @override
+  String upscaleStart(int w, int h) {
+    return 'Starting V5 upscale $w×$h';
+  }
+
+  @override
+  String get addToCreate => 'Add to Create';
+
+  @override
+  String get savedToImg2ImgUpscale => 'Saved to img2img upscale';
 
   @override
   String redrawStart(String scale, int w, int h, String model) {
@@ -5879,7 +5940,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get failRetries => 'Retry on error';
 
   @override
-  String get failRetriesDesc => 'Resend on errors, without the attached image';
+  String get failRetriesDesc => 'Resend on errors';
+
+  @override
+  String get retryStripImage => 'Drop images on last retry';
+
+  @override
+  String get retryStripImageDesc => 'Omit attached images on the final retry';
 
   @override
   String get refusalRetries => 'Retry on refusal';

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -19,9 +20,8 @@ class BlobStore {
 
   final Directory _dir;
 
-  /// 工作台、图库、助手各自排队保存,同一 blob 的并发调用共享一次写入,
-  /// 避免争用原子写的临时文件。
-  final Map<String, Future<void>> _writes = {};
+  /// 正在写入的哈希 → 写入任务,合并同一哈希的并发写入,避免写同一 .tmp 冲突。
+  final _inflight = <String, Future<void>>{};
 
   /// bytes 对象 → 已算过的哈希备忘(同一对象在防抖保存里反复出现,
   /// 不重复算 sha256)。
@@ -48,17 +48,22 @@ class BlobStore {
   /// 哈希对不上,却会被后续 [get] 当成有效缓存命中 —— 比文件缺失更糟。
   Future<String> put(Uint8List bytes, {String? known}) async {
     final h = await hashOf(bytes, known: known);
-    final write = _writes.putIfAbsent(h, () async {
+    final pending = _inflight[h];
+    if (pending != null) {
+      await pending;
+      return h;
+    }
+    Future<void> write() async {
       final f = _fileOf(h);
       if (!await f.exists()) await writeBytesAtomic(f, bytes);
-    });
+    }
+
+    final work = write();
+    _inflight[h] = work;
     try {
-      await write;
+      await work;
     } finally {
-      // 成功或失败都释放;失败后下一次保存仍可重试。
-      if (identical(_writes[h], write)) {
-        final _ = _writes.remove(h);
-      }
+      if (identical(_inflight[h], work)) unawaited(_inflight.remove(h));
     }
     return h;
   }
@@ -67,7 +72,9 @@ class BlobStore {
     try {
       final f = _fileOf(hash);
       if (!await f.exists()) return null;
-      return await f.readAsBytes();
+      final bytes = await f.readAsBytes();
+      _hashMemo[bytes] = hash;
+      return bytes;
     } catch (_) {
       return null;
     }

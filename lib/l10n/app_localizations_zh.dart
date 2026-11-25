@@ -213,6 +213,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get refCharacterStyle => '角色&风格';
 
   @override
+  String get refOutfit => '服装';
+
+  @override
+  String get preferSameOutfit => '优先相同服装';
+
+  @override
   String get characters => '角色';
 
   @override
@@ -779,7 +785,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get importCharRef => '导入角色参考图';
 
   @override
-  String get charRefOnly45 => '角色参考仅 4.5 模型支持,当前模型生成时不会发送。';
+  String get charRefOnly45 => '当前模型不支持角色参考，生成时不会发送。';
+
+  @override
+  String get charRefOutfitSkipped => '当前模型不支持「服装」参考，已选的服装参考图在生成时将被跳过。';
+
+  @override
+  String get charRefIgnoredInpaint => '当前模型重绘时不支持角色参考';
+
+  @override
+  String charRefMaxExceeded(int max) {
+    return '最多同时生效 $max 张角色参考图，超出的将在生成时被跳过。';
+  }
 
   @override
   String filesImportFailed(int n) {
@@ -2326,7 +2343,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get downloadOnGithub => '去 GitHub 下载';
 
   @override
-  String get ghRateLimited => 'GitHub 查询次数已达上限,请稍后再试';
+  String get downloadUpdate => '下载新版';
 
   @override
   String updateHttpFailed(int code) {
@@ -2340,7 +2357,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get updateTimeout => '检查更新超时,请检查网络后重试';
 
   @override
-  String get cantReachGithub => '连不上 GitHub,请检查网络后重试';
+  String get cantReachUpdateServer => '连不上服务器,请检查网络后重试';
 
   @override
   String get updateFailed => '检查更新失败,请稍后重试';
@@ -2350,6 +2367,37 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get imageMetadata => '图片元数据';
+
+  @override
+  String get compareImages => '图片比对';
+
+  @override
+  String get swapAB => '交换 A / B';
+
+  @override
+  String get onlyInA => '仅 A';
+
+  @override
+  String get onlyInB => '仅 B';
+
+  @override
+  String get weightChanged => '权重不同';
+
+  @override
+  String get orderChanged => '位置不同';
+
+  @override
+  String get identical => '相同';
+
+  @override
+  String identicalN(int n) {
+    return '$n 项相同';
+  }
+
+  @override
+  String differentN(int n) {
+    return '$n 项不同';
+  }
 
   @override
   String get enterOverwritePrompt => '先填要覆写的提示词';
@@ -3797,6 +3845,17 @@ class AppLocalizationsZh extends AppLocalizations {
   String redrawStartMax(int w, int h, String model) {
     return '开始 Max 重绘 ≈$w×$h · $model';
   }
+
+  @override
+  String upscaleStart(int w, int h) {
+    return '开始 V5 超分 $w×$h';
+  }
+
+  @override
+  String get addToCreate => '存入创作页';
+
+  @override
+  String get savedToImg2ImgUpscale => '已存入图生图放大';
 
   @override
   String redrawStart(String scale, int w, int h, String model) {
@@ -5411,7 +5470,13 @@ class AppLocalizationsZh extends AppLocalizations {
   String get failRetries => '失败重试';
 
   @override
-  String get failRetriesDesc => '出错时自动重发，重发时不带附图';
+  String get failRetriesDesc => '出错时自动重发';
+
+  @override
+  String get retryStripImage => '最后一次重试不带图';
+
+  @override
+  String get retryStripImageDesc => '最后一次失败重试时去掉附图';
 
   @override
   String get refusalRetries => '拒绝重试';
