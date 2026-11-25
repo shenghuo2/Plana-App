@@ -344,8 +344,39 @@ def cmd_pre_commit(_: argparse.Namespace) -> int:
                 "请将 Flutter/Dart SDK 加入 PATH 后重试。"
             )
         else:
+            merge_head = resolve_commit("MERGE_HEAD")
+
+            def is_unchanged_from_merge_head(path: str) -> bool:
+                """Skip dart format on files kept byte-identical to MERGE_HEAD."""
+                if not merge_head:
+                    return False
+                idx_res = run_git(
+                    ["rev-parse", "--verify", "--quiet", f":{path}"],
+                    check=False,
+                    text=True,
+                )
+                if idx_res.returncode != 0:
+                    return False
+                mh_res = run_git(
+                    [
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        f"{merge_head}:{path}",
+                    ],
+                    check=False,
+                    text=True,
+                )
+                return (
+                    mh_res.returncode == 0
+                    and idx_res.stdout.strip() == mh_res.stdout.strip()
+                )
+
+            format_dart = [
+                p for p in staged_dart if not is_unchanged_from_merge_head(p)
+            ]
             unformatted: list[str] = []
-            for path in staged_dart:
+            for path in format_dart:
                 blob = run_git(["show", f":{path}"], text=False).stdout
                 fmt = subprocess.run(
                     [
